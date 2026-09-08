@@ -1,20 +1,25 @@
 from __future__ import annotations
 
 import os
-import select
+import queue
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from rich.console import Console
+from rich.table import Table
 
 from starfelt.core.analyze import AnalysisReport, Check, analyze_script
 from starfelt.core.config import StarfeltConfig
-from starfelt.core.cost import CostTracker, write_active_run, clear_active_run
+from starfelt.core.cost import CostTracker, clear_active_run, write_active_run
 
 console = Console(stderr=True)
+
+# Sentinel for reader thread end
+_STDOUT_DONE = object()
 
 
 @dataclass
@@ -25,10 +30,11 @@ class RunResult:
     cost_usd: float
     dry_run: bool = False
     checks: list[Check] = field(default_factory=list)
+    aborted: bool = False
 
 
 def _format_elapsed(seconds: float) -> str:
-    s = int(seconds)
+    s = int(max(0, seconds))
     m, s = divmod(s, 60)
     h, m = divmod(m, 60)
     if h:
@@ -36,22 +42,16 @@ def _format_elapsed(seconds: float) -> str:
     return f"{m:02d}:{s:02d}"
 
 
-def _print_preflight(report: AnalysisReport) -> None:
-    warns = [c for c in report.checks if c.level == "warn"]
-    fails = [c for c in report.checks if c.level == "fail"]
-    if not warns and not fails:
-        console.print("[dim]Pre-run analysis[/] · all checks ok")
-        return
-    console.print("[bold]Pre-run analysis[/]")
-    for c in fails:
-        console.print(f"  [red]✗ fail[/]  {c.name}: {c.detail}")
-    for c in warns:
-        console.print(f"  [yellow]⚠ warn[/]  {c.name}: {c.detail}")
-    if fails:
-        console.print(
-            "[yellow]Launching anyway[/] — fix these when you can; "
-            "failed runs will re-show them."
-        )
+def print_preflight_table(report: AnalysisReport) -> None:
+    """Same shape as `starfelt analyze` — intentional preflight."""
+    table = Table(title="Pre-run analysis", show_header=True, header_style="bold")
+    table.add_column("Check")
+    table.add_column("Status")
+    table.add_column("Detail")
+    for item in report.checks:
+        style = {"ok": "green", "warn": "yellow", "fail": "red"}.get(item.level, "white")
+        table.add_row(item.name, f"[{style}]{item.level}[/]", item.detail)
+    console.print(table)
 
 
 def _print_failed_checks(checks: list[Check]) -> None:
@@ -65,15 +65,62 @@ def _print_failed_checks(checks: list[Check]) -> None:
         console.print(f"  [{color}]{c.level}[/] · {c.name}: {c.detail}")
 
 
+def _reader_thread(pipe, q: queue.Queue) -> None:
+    """Read child stdout line-by-line; works on Windows (no select)."""
+    try:
+        # Text mode IO wrapper
+        for line in iter(pipe.readline, ""):
+            q.put(line)
+    except Exception as e:  # noqa: BLE001
+        q.put(f"[starfelt] stdout reader error: {e}\n")
+    finally:
+        try:
+            pipe.close()
+        except Exception:  # noqa: BLE001
+            pass
+        q.put(_STDOUT_DONE)
+
+
 def run_wrapped(
     script: Path,
     script_args: list[str],
     cfg: StarfeltConfig,
     dry_run: bool = False,
+    force: bool = False,
+    confirm_fails: bool = True,
 ) -> RunResult:
-    """Execute training script with streamed output + live cost ticker."""
+    """Execute training script with streamed output + live cost ticker.
+
+    Cross-platform: thread + queue for stdout (no select).
+    """
     report = analyze_script(script, cfg)
-    _print_preflight(report)
+    print_preflight_table(report)
+
+    fails = [c for c in report.checks if c.level == "fail"]
+    if fails and confirm_fails and not force and not dry_run:
+        n = len(fails)
+        label = "issue" if n == 1 else "issues"
+        console.print()
+        console.print(
+            f"[bold red]{n} critical {label} found.[/] "
+            "Run anyway? [y/N]",
+            end=" ",
+        )
+        try:
+            answer = input().strip().lower()
+        except EOFError:
+            answer = "n"
+        if answer not in {"y", "yes"}:
+            console.print("[yellow]Aborted[/] — fix fails or pass --force.")
+            return RunResult(
+                run_id="aborted",
+                exit_code=2,
+                duration_s=0,
+                cost_usd=0,
+                dry_run=False,
+                checks=report.checks,
+                aborted=True,
+            )
 
     if dry_run:
         return RunResult(
@@ -94,6 +141,7 @@ def run_wrapped(
     env["PYTHONUNBUFFERED"] = "1"
 
     cmd = [sys.executable, "-u", str(script), *script_args]
+    console.print()
     console.print(
         f"[bold cyan]▶[/] [cyan]starfelt run[/] {script.name}  "
         f"[dim]id={tracker.run_id[:8]}[/]"
@@ -114,18 +162,23 @@ def run_wrapped(
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        bufsize=0,
+        text=True,
+        bufsize=1,
+        encoding="utf-8",
+        errors="replace",
     )
 
+    q: queue.Queue = queue.Queue()
     assert proc.stdout is not None
+    t = threading.Thread(target=_reader_thread, args=(proc.stdout, q), daemon=True)
+    t.start()
+
     t0 = time.time()
     last_tick = 0.0
-    # binary read for select compatibility
-    leftover = b""
 
     try:
+        done_reading = False
         while True:
-            # live ticker every ~0.25s even if no output
             now = time.time()
             if now - last_tick >= 0.25:
                 elapsed = now - t0
@@ -134,45 +187,42 @@ def run_wrapped(
                 console.print(f"\r[dim]{tick}[/]", end="", highlight=False)
                 last_tick = now
 
-            if proc.poll() is not None:
-                # drain remaining
-                rest = proc.stdout.read()
-                if rest:
-                    leftover += rest
-                break
+            try:
+                item = q.get(timeout=0.25)
+            except queue.Empty:
+                if proc.poll() is not None and done_reading:
+                    break
+                if proc.poll() is not None and q.empty():
+                    # process ended; wait a beat for trailing lines
+                    try:
+                        item = q.get(timeout=0.1)
+                    except queue.Empty:
+                        done_reading = True
+                        if not t.is_alive():
+                            break
+                        continue
+                else:
+                    continue
 
-            ready, _, _ = select.select([proc.stdout], [], [], 0.25)
-            if not ready:
-                continue
-            chunk = proc.stdout.read(4096)
-            if not chunk:
+            if item is _STDOUT_DONE:
+                done_reading = True
                 if proc.poll() is not None:
                     break
                 continue
-            leftover += chunk
-            while b"\n" in leftover:
-                line, leftover = leftover.split(b"\n", 1)
-                text = line.decode("utf-8", errors="replace")
-                # clear ticker line then print process output
-                console.print("\r" + " " * 40 + "\r", end="")
-                # child output to stdout (user-facing)
-                sys.stdout.write(text + "\n")
-                sys.stdout.flush()
 
-        if leftover.strip():
-            console.print("\r" + " " * 40 + "\r", end="")
-            sys.stdout.write(leftover.decode("utf-8", errors="replace"))
-            if not leftover.endswith(b"\n"):
-                sys.stdout.write("\n")
+            line = item if isinstance(item, str) else str(item)
+            console.print("\r" + " " * 48 + "\r", end="")
+            sys.stdout.write(line if line.endswith("\n") else line + "\n")
             sys.stdout.flush()
+
+        t.join(timeout=2.0)
     finally:
         clear_active_run()
         if proc.poll() is None:
             proc.kill()
             proc.wait()
 
-    # final newline after ticker
-    console.print("\r" + " " * 40 + "\r", end="")
+    console.print("\r" + " " * 48 + "\r", end="")
     exit_code = proc.returncode if proc.returncode is not None else 1
     row = tracker.finish(exit_code)
 
@@ -186,4 +236,5 @@ def run_wrapped(
         cost_usd=row["cost_usd"],
         dry_run=False,
         checks=report.checks,
+        aborted=False,
     )
