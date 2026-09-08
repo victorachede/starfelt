@@ -10,7 +10,6 @@ import json
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-
 TELEMETRY_SCHEMA_VERSION = "1.0.0"
 
 # Documented schema (also enforced loosely when building records)

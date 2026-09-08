@@ -283,5 +283,66 @@ def providers_list() -> None:
     console.print(table)
 
 
+
+@cli.command("doctor")
+def doctor_cmd() -> None:
+    """Full environment check — first stop when something breaks."""
+    from starfelt.core.doctor import collect_doctor_rows
+
+    rows = collect_doctor_rows()
+    table = Table(title="starfelt doctor", show_header=True, header_style="bold")
+    table.add_column("Check")
+    table.add_column("Status")
+    table.add_column("Detail")
+    for name, status, detail in rows:
+        style = {"ok": "green", "warn": "yellow", "fail": "red"}.get(status, "white")
+        table.add_row(name, f"[{style}]{status}[/]", detail)
+    console.print(table)
+    fails = sum(1 for _, s, _ in rows if s == "fail")
+    warns = sum(1 for _, s, _ in rows if s == "warn")
+    if fails:
+        console.print(f"[red]{fails} failed[/] · fix these before relying on runs")
+        raise SystemExit(1)
+    if warns:
+        console.print(f"[yellow]{warns} warning(s)[/] · optional / non-blocking")
+    else:
+        console.print("[green]All checks passed[/]")
+
+
+@cli.command("login")
+@click.option("--url", prompt="Supabase URL", help="https://xxxx.supabase.co")
+@click.option("--key", prompt=True, hide_input=True, help="Supabase anon or service key")
+def login_cmd(url: str, key: str) -> None:
+    """Opt-in hosted history — store credentials in ~/.starfelt/auth.json."""
+    from starfelt.core.hosted import save_auth
+
+    path = save_auth({"supabase_url": url.strip().rstrip("/"), "supabase_key": key.strip()})
+    console.print(f"[green]✓[/] Saved credentials → {path}")
+    console.print("Create table [cyan]starfelt_runs[/] (see docs/HOSTED.md), then: [cyan]starfelt sync[/]")
+
+
+@cli.command("logout")
+def logout_cmd() -> None:
+    """Remove ~/.starfelt/auth.json."""
+    from starfelt.core.hosted import auth_path, clear_auth
+
+    clear_auth()
+    console.print(f"[dim]Cleared[/] {auth_path()}")
+
+
+@cli.command("sync")
+def sync_cmd() -> None:
+    """Push local .starfelt history to Supabase (requires login)."""
+    from starfelt.core.cost import load_history
+    from starfelt.core.hosted import sync_runs
+
+    n, msg = sync_runs(load_history())
+    if n:
+        console.print(f"[green]{msg}[/]")
+    else:
+        console.print(f"[yellow]{msg}[/]")
+        raise SystemExit(1)
+
+
 if __name__ == "__main__":
     cli()

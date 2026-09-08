@@ -3,8 +3,9 @@
 **Training efficiency layer.** Point it at your training script — Starfelt analyzes, monitors, and tracks cost. No infra rewrite.
 
 ```bash
-pip install -e .
+pip install -e ".[dev]"   # or: pip install starfelt (after PyPI)
 starfelt init
+starfelt doctor
 starfelt run examples/train_toy.py
 ```
 
@@ -49,6 +50,9 @@ starfelt status --watch
 | `starfelt cost` | Full local cost history |
 | `starfelt cost --compare` | Actual vs baseline + savings |
 | `starfelt providers list` | Static GPU price catalog |
+| `starfelt doctor` | Full environment diagnostics |
+| `starfelt login` / `sync` | Optional Supabase history |
+
 
 ---
 

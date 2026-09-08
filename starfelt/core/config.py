@@ -57,7 +57,7 @@ class StarfeltConfig:
                 f"cost.baseline_multiplier should be >= 1.0 (got {self.baseline_multiplier})"
             )
         if self.patience_steps < 1:
-            errors.append(f"early_stop.patience_steps must be >= 1")
+            errors.append("early_stop.patience_steps must be >= 1")
         for p in self.preferred_providers:
             if p not in KNOWN_PROVIDERS:
                 errors.append(
