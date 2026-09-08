@@ -10,6 +10,10 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Proprietary" }
 authors = [{ name = "Victor Achede" }]
+
+[project.urls]
+Homepage = "https://github.com/victorachede/starfelt"
+Repository = "https://github.com/victorachede/starfelt"
 dependencies = [
   "click>=8.1",
   "rich>=13.0",

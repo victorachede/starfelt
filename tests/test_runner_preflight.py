@@ -2,7 +2,7 @@ from pathlib import Path
 
 from starfelt.core.analyze import analyze_script
 from starfelt.core.config import StarfeltConfig, validate_environment
-from starfelt.core.runner import print_preflight_table, run_wrapped
+from starfelt.core.runner import run_wrapped
 
 
 def test_validate_environment_has_python():

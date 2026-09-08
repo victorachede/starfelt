@@ -2,7 +2,7 @@ from pathlib import Path
 
 from starfelt.core.analyze import analyze_script
 from starfelt.core.config import StarfeltConfig
-from starfelt.core.telemetry import build_run_telemetry, workload_id, TelemetryHints
+from starfelt.core.telemetry import TelemetryHints, build_run_telemetry, workload_id
 
 
 def test_framework_pytorch(tmp_path: Path):

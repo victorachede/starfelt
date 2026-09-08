@@ -177,7 +177,6 @@ def run_wrapped(
     )
 
     interrupted = {"sig": None}
-    child_pid = proc.pid
 
     def _on_signal(signum: int, _frame) -> None:
         name = signal.Signals(signum).name

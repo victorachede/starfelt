@@ -4,8 +4,8 @@ from pathlib import Path
 import pytest
 
 from starfelt.callbacks import StarfeltCallback
-from starfelt.core.config import StarfeltConfig, load_config
-from starfelt.core.cost import write_interrupted_marker, load_history
+from starfelt.core.config import load_config
+from starfelt.core.cost import write_interrupted_marker
 from starfelt.core.gpu import GpuMonitor
 from starfelt.providers.base import CATALOG, pick_cheapest
 
