@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import click
@@ -12,8 +13,8 @@ from rich.table import Table
 
 from starfelt import __version__
 from starfelt.core.analyze import analyze_script
-from starfelt.core.cost import CostTracker, load_history
 from starfelt.core.config import init_project, load_config
+from starfelt.core.cost import load_history, read_active_run
 from starfelt.core.runner import run_wrapped
 
 console = Console()
@@ -85,6 +86,7 @@ def run_cmd(
     if result.dry_run:
         console.print("[yellow]Dry run[/] — no process started.")
         return
+    console.print()
     console.print(
         Panel(
             f"Exit code: {result.exit_code}\n"
@@ -123,6 +125,52 @@ def cost_cmd(as_json: bool) -> None:
     console.print(table)
     total = sum(r.get("cost_usd", 0) for r in history)
     console.print(f"Total tracked: [bold]${total:.4f}[/]")
+
+
+@cli.command("status")
+def status_cmd() -> None:
+    """Active run (if any), last 5 runs, total spend."""
+    active = read_active_run()
+    history = load_history()
+
+    if active:
+        started = float(active.get("started_at") or time.time())
+        elapsed = max(0.0, time.time() - started)
+        rate = float(active.get("gpu_hour_usd") or 1.2)
+        cost = (elapsed / 3600.0) * rate
+        console.print(
+            Panel(
+                f"Run id: {active.get('run_id', '?')}\n"
+                f"Script: {active.get('script', '?')}\n"
+                f"Elapsed: {elapsed:.0f}s\n"
+                f"Live cost: ${cost:.4f}",
+                title="Active run",
+                border_style="cyan",
+            )
+        )
+    else:
+        console.print("[dim]No active run[/]")
+
+    table = Table(title="Last 5 runs", header_style="bold")
+    table.add_column("Run")
+    table.add_column("Script")
+    table.add_column("Duration")
+    table.add_column("Cost")
+    table.add_column("Exit")
+    if not history:
+        table.add_row("—", "no runs yet", "—", "—", "—")
+    else:
+        for row in history[-5:]:
+            table.add_row(
+                str(row.get("run_id", "?"))[:8],
+                str(row.get("script", "")),
+                f"{row.get('duration_s', 0):.1f}s",
+                f"${row.get('cost_usd', 0):.4f}",
+                str(row.get("exit_code", "")),
+            )
+    console.print(table)
+    total = sum(r.get("cost_usd", 0) for r in history)
+    console.print(f"Total spend tracked: [bold]${total:.4f}[/]")
 
 
 if __name__ == "__main__":
