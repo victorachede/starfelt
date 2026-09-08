@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -44,6 +45,12 @@ class StarfeltConfig:
     raw: dict[str, Any] = field(default_factory=dict)
 
 
+def click_error(msg: str) -> Exception:
+    import click
+
+    return click.ClickException(msg)
+
+
 def init_project(cwd: Path, force: bool = False) -> Path:
     path = cwd / "starfelt.yaml"
     if path.exists() and not force:
@@ -54,10 +61,47 @@ def init_project(cwd: Path, force: bool = False) -> Path:
     return path
 
 
-def click_error(msg: str) -> Exception:
-    import click
+def validate_environment() -> list[tuple[str, str, str]]:
+    """Return list of (check, status ok|fail, detail)."""
+    rows: list[tuple[str, str, str]] = []
+    major, minor = sys.version_info[:2]
+    py_ok = (major, minor) >= (3, 10)
+    rows.append(
+        (
+            "python",
+            "ok" if py_ok else "fail",
+            f"{major}.{minor}.{sys.version_info[2]}"
+            + ("" if py_ok else " (need 3.10+)"),
+        )
+    )
+    try:
+        import psutil  # noqa: F401
 
-    return click.ClickException(msg)
+        rows.append(("psutil", "ok", "importable"))
+    except ImportError:
+        rows.append(("psutil", "fail", "not installed — pip install psutil"))
+    try:
+        import yaml as _yaml  # noqa: F401
+
+        rows.append(("pyyaml", "ok", "importable"))
+    except ImportError:
+        rows.append(("pyyaml", "fail", "not installed"))
+    try:
+        import rich  # noqa: F401
+
+        rows.append(("rich", "ok", "importable"))
+    except ImportError:
+        rows.append(("rich", "fail", "not installed"))
+    starfelt_dir = Path.cwd() / ".starfelt"
+    try:
+        starfelt_dir.mkdir(exist_ok=True)
+        probe = starfelt_dir / ".write_test"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+        rows.append((".starfelt/", "ok", "writable"))
+    except OSError as e:
+        rows.append((".starfelt/", "fail", str(e)))
+    return rows
 
 
 def load_config(path: Path | None = None) -> StarfeltConfig:

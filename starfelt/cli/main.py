@@ -8,12 +8,13 @@ from pathlib import Path
 
 import click
 from rich.console import Console
+from rich.live import Live
 from rich.panel import Panel
 from rich.table import Table
 
 from starfelt import __version__
 from starfelt.core.analyze import analyze_script
-from starfelt.core.config import init_project, load_config
+from starfelt.core.config import init_project, load_config, validate_environment
 from starfelt.core.cost import load_history, read_active_run
 from starfelt.core.runner import run_wrapped
 
@@ -29,10 +30,26 @@ def cli() -> None:
 @cli.command("init")
 @click.option("--force", is_flag=True, help="Overwrite existing starfelt.yaml")
 def init_cmd(force: bool) -> None:
-    """Create starfelt.yaml in the current directory."""
+    """Create starfelt.yaml and validate the local environment."""
     path = init_project(Path.cwd(), force=force)
     console.print(f"[bold green]✓[/] Wrote {path}")
-    console.print("Edit providers / budget, then: [cyan]starfelt run train.py[/]")
+
+    rows = validate_environment()
+    table = Table(title="Environment", show_header=True, header_style="bold")
+    table.add_column("Check")
+    table.add_column("Status")
+    table.add_column("Detail")
+    for name, status, detail in rows:
+        style = "green" if status == "ok" else "red"
+        table.add_row(name, f"[{style}]{status}[/]", detail)
+    console.print(table)
+
+    if any(s == "fail" for _, s, _ in rows):
+        console.print(
+            "[yellow]Fix failed checks before relying on cost/GPU metrics.[/]"
+        )
+    else:
+        console.print("Next: [cyan]starfelt analyze examples/train_toy.py[/]")
 
 
 @cli.command("analyze")
@@ -69,11 +86,17 @@ def analyze_cmd(script: str, config_path: str | None) -> None:
 @click.argument("script_args", nargs=-1, type=click.UNPROCESSED)
 @click.option("--config", "config_path", default=None, type=click.Path(dir_okay=False))
 @click.option("--dry-run", is_flag=True, help="Analyze + plan only; do not execute")
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Skip confirmation when analysis has fail-level checks",
+)
 def run_cmd(
     script: str,
     script_args: tuple[str, ...],
     config_path: str | None,
     dry_run: bool,
+    force: bool,
 ) -> None:
     """Wrap and run a training script with Starfelt monitoring."""
     cfg = load_config(Path(config_path) if config_path else None)
@@ -82,7 +105,11 @@ def run_cmd(
         list(script_args),
         cfg,
         dry_run=dry_run,
+        force=force,
+        confirm_fails=not force,
     )
+    if result.aborted:
+        raise SystemExit(2)
     if result.dry_run:
         console.print("[yellow]Dry run[/] — no process started.")
         return
@@ -127,18 +154,18 @@ def cost_cmd(as_json: bool) -> None:
     console.print(f"Total tracked: [bold]${total:.4f}[/]")
 
 
-@cli.command("status")
-def status_cmd() -> None:
-    """Active run (if any), last 5 runs, total spend."""
+def _status_renderable():
     active = read_active_run()
     history = load_history()
+    from rich.console import Group
 
+    parts = []
     if active:
         started = float(active.get("started_at") or time.time())
         elapsed = max(0.0, time.time() - started)
         rate = float(active.get("gpu_hour_usd") or 1.2)
         cost = (elapsed / 3600.0) * rate
-        console.print(
+        parts.append(
             Panel(
                 f"Run id: {active.get('run_id', '?')}\n"
                 f"Script: {active.get('script', '?')}\n"
@@ -149,7 +176,7 @@ def status_cmd() -> None:
             )
         )
     else:
-        console.print("[dim]No active run[/]")
+        parts.append(Panel("No active run", border_style="dim"))
 
     table = Table(title="Last 5 runs", header_style="bold")
     table.add_column("Run")
@@ -168,9 +195,33 @@ def status_cmd() -> None:
                 f"${row.get('cost_usd', 0):.4f}",
                 str(row.get("exit_code", "")),
             )
-    console.print(table)
+    parts.append(table)
     total = sum(r.get("cost_usd", 0) for r in history)
-    console.print(f"Total spend tracked: [bold]${total:.4f}[/]")
+    parts.append(Panel(f"Total spend tracked: ${total:.4f}", border_style="green"))
+    return Group(*parts)
+
+
+@cli.command("status")
+@click.option(
+    "--watch",
+    "-w",
+    is_flag=True,
+    help="Refresh every second (live elapsed + cost)",
+)
+def status_cmd(watch: bool) -> None:
+    """Active run (if any), last 5 runs, total spend."""
+    if not watch:
+        console.print(_status_renderable())
+        return
+
+    console.print("[dim]Watching status · Ctrl+C to stop[/]")
+    try:
+        with Live(_status_renderable(), console=console, refresh_per_second=1) as live:
+            while True:
+                time.sleep(1)
+                live.update(_status_renderable())
+    except KeyboardInterrupt:
+        console.print("\n[dim]Stopped watching[/]")
 
 
 if __name__ == "__main__":

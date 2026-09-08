@@ -1,46 +1,67 @@
 # Starfelt
 
-**Training efficiency layer.** Point it at your PyTorch training script — Starfelt analyzes, monitors, and tracks cost. No infra rewrite.
+**Training efficiency layer.** Point it at your training script — Starfelt analyzes, monitors, and tracks cost. No infra rewrite.
 
 ```bash
 pip install -e .
 starfelt init
-starfelt run train.py
+starfelt run examples/train_toy.py
 ```
 
-> Private · Stage 1 — analysis + runtime monitoring · **one user who says “this saved me money”**
+> Private · Stage 1 — pre-run analysis + live run monitoring  
+> Goal: one user who says *“this saved me money.”*
 
 ---
 
-## Stage 1 non-negotiables
+## Quickstart (copy-paste)
 
-- CLI is zero-friction: `starfelt run train.py` just works  
-- **PyTorch first** — everything else later  
-- Dashboard can be a **terminal UI** to start  
-- Ship **pre-run analysis + runtime monitoring** before cloud orchestration  
+```bash
+git clone https://github.com/victorachede/starfelt.git
+cd starfelt
+pip install -e ".[dev]"
 
-### Explicitly later
+starfelt init
+starfelt analyze examples/train_toy.py
+starfelt run examples/train_toy.py
+starfelt status
+starfelt cost
+```
 
-- Multi-provider orchestration (RunPod / AWS / …)  
-- Enterprise tier / SLA packaging  
-- Full web cost console  
+Optional while a run is active in another terminal:
+
+```bash
+starfelt status --watch
+```
 
 ---
 
 ## Commands
 
-| Command | |
-|---------|--|
-| `starfelt init` | Write `starfelt.yaml` + `.starfelt/` |
-| `starfelt analyze train.py` | Pre-run checks (batch, LR, data, cost sketch) |
-| `starfelt run train.py` | Wrap process, track cost, emit run id |
-| `starfelt cost` | Terminal cost history |
+| Command | What it does |
+|---------|----------------|
+| `starfelt init` | Write `starfelt.yaml` + `.starfelt/`, validate Python/deps |
+| `starfelt analyze SCRIPT` | Pre-run AST checks (batch, LR, DataLoader, scheduler, budget) |
+| `starfelt run SCRIPT` | Preflight table → stream logs → live cost ticker → cost record |
+| `starfelt run SCRIPT --force` | Skip “critical issue — run anyway?” prompt |
+| `starfelt run SCRIPT --dry-run` | Analyze only |
+| `starfelt status` | Active run + last 5 + total spend |
+| `starfelt status --watch` | Live refresh every second |
+| `starfelt cost` | Full local cost history |
 
-```bash
-starfelt analyze examples/train_toy.py
-starfelt run examples/train_toy.py
-starfelt cost
-```
+---
+
+## What Stage 1 is
+
+- **PyTorch-first** analysis (AST, not string soup)
+- **Live** `run`: streamed stdout, cost ticker, fail confirmation
+- **Terminal** cost/status (no web dashboard yet)
+- Local history under `.starfelt/`
+
+## What Stage 1 is not
+
+- Multi-cloud provisioning  
+- Enterprise billing  
+- Web app  
 
 ---
 
@@ -48,27 +69,14 @@ starfelt cost
 
 ```
 starfelt/
-  cli/           # init | analyze | run | cost
-  core/          # analysis, runner, cost, data helpers
-  providers/     # stubs only — not Stage 1 product surface
-examples/
-docs/STAGE1.md
+  cli/        # init | analyze | run | status | cost
+  core/       # analysis, runner, cost, config
+  providers/  # static price stubs only
+examples/train_toy.py
 ```
 
 ---
 
-## Stack (Stage 1)
+## License
 
-| Piece | Choice |
-|-------|--------|
-| CLI / SDK | Python |
-| Dashboard | **Terminal first** (`starfelt cost` + rich tables) |
-| Run history | **Local** `.starfelt/` → optional **Supabase** when you want sync across machines |
-
-Same Supabase org as ASKTC is fine later; don’t block Stage 1 on it.
-
----
-
-## Goal
-
-One serious training user: *“this saved me money.”* That’s the exit criterion for Stage 1.
+Proprietary · private repository
