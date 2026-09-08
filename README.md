@@ -80,39 +80,34 @@ Real signal from the first runs: same model, different flags → measurable $ di
 ## Trainer SDK
 
 ```python
-from starfelt import Trainer, StarfeltCallback
+from starfelt import Trainer
 
 trainer = Trainer(
     model=model,
     optimizer=optimizer,
     train_loader=train_loader,
-    loss_fn=criterion,          # optional if model returns scalar loss
+    loss_fn=criterion,
+    val_loader=val_loader,       # enables val metrics + early-stop
     epochs=10,
-    amp=True,                   # mixed precision when CUDA available
-    checkpoint_every_epochs=1,
+    grad_accum_steps=4,          # effective larger batch
+    amp=True,                    # mixed precision on CUDA
+    early_stop_patience=3,       # stop when val stalls
+    data_parallel=True,          # multi-GPU when available
 )
 result = trainer.fit()
 
-print(result.run_id, result.cost_usd, result.final_loss)
-print(result.epoch_history)     # per-epoch loss / lr / gpu / cost
+print(result.final_loss, result.best_val_loss, result.cost_usd)
+print(result.epoch_history)  # loss, val_loss, lr, smp/s, gpu, mem, cost
 ```
 
-Under the hood it:
+Under the hood:
 
-- Checkpoints to `.starfelt/checkpoints/{run_id}/`
-- Runs `StarfeltCallback` early-stop (respects `STARFELT_EARLY_STOP`)
-- Records per-epoch telemetry into the same run JSON the CLI uses
-- Honors `STARFELT_RESUME_FROM` for seamless resume
-
-Plugin hooks for advanced users:
-
-```python
-from starfelt.hooks import on_epoch_end, on_checkpoint, on_budget_warning
-
-@on_epoch_end
-def log(epoch, loss, cost_so_far):
-    ...
-```
+- Gradient accumulation + AMP + optional DataParallel
+- Eval loop and early-stop on validation loss
+- Checkpoints to `.starfelt/checkpoints/{run_id}/` (incl. `best.pt`)
+- Per-epoch telemetry: loss, val_loss, samples/sec, GPU util, peak memory, cost
+- Resume via `STARFELT_RESUME_FROM`
+- Plugin hooks (`on_epoch_end`, `on_checkpoint`, `on_budget_warning`)
 
 ---
 
@@ -120,10 +115,11 @@ def log(epoch, loss, cost_so_far):
 
 ```
 examples/
-  train_toy.py           # zero-dep smoke test
-  train_resnet.py        # tiny ResNet + Trainer SDK
-  train_llm_finetune.py  # causal LM sketch + Trainer SDK
-  train_jax.py           # JAX loop (framework detection)
+  train_toy.py              # zero-dep smoke test
+  train_resnet.py           # tiny ResNet + Trainer SDK
+  train_llm_finetune.py     # causal LM sketch + Trainer SDK
+  finetune_classifier.py    # train+val, grad accum, early-stop on val
+  train_jax.py              # JAX loop (framework detection)
 ```
 
 ```bash

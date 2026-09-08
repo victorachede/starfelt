@@ -419,20 +419,28 @@ def inspect_cmd(run_id: str, as_json: bool) -> None:
         ep_table = Table(title="Per-epoch telemetry", header_style="bold")
         ep_table.add_column("Epoch")
         ep_table.add_column("Loss")
+        ep_table.add_column("Val")
         ep_table.add_column("LR")
+        ep_table.add_column("smp/s")
         ep_table.add_column("Duration")
-        ep_table.add_column("Cost so far")
+        ep_table.add_column("Cost")
         ep_table.add_column("GPU %")
+        ep_table.add_column("Mem MB")
         for e in history:
             ep_table.add_row(
                 str(e.get("epoch", "")),
                 f"{e.get('loss', 0):.4f}",
+                f"{e.get('val_loss'):.4f}" if e.get("val_loss") is not None else "—",
                 f"{e.get('lr'):.2e}" if e.get("lr") is not None else "—",
+                f"{e.get('samples_per_sec'):.0f}" if e.get("samples_per_sec") is not None else "—",
                 f"{e.get('duration_s', 0):.1f}s",
                 f"${e.get('cost_usd', 0):.4f}",
                 f"{e.get('gpu_util'):.0f}" if e.get("gpu_util") is not None else "—",
+                f"{e.get('peak_mem_mb'):.0f}" if e.get("peak_mem_mb") is not None else "—",
             )
         console.print(ep_table)
+    if row.get("best_val_loss") is not None:
+        console.print(f"[dim]Best val loss: {row['best_val_loss']:.4f}[/]")
 
     console.print()
     flags = row.get("optimization_flags") or []

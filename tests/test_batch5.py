@@ -61,14 +61,22 @@ def test_trainer_smoke(tmp_path, monkeypatch):
     model = nn.Linear(4, 1)
     opt = torch.optim.SGD(model.parameters(), lr=0.05)
     trainer = Trainer(
-        model, opt, loader, loss_fn=nn.MSELoss(), epochs=2, checkpoint_every_epochs=1
+        model,
+        opt,
+        loader,
+        loss_fn=nn.MSELoss(),
+        epochs=2,
+        checkpoint_every_epochs=1,
+        grad_accum_steps=2,
     )
     result = trainer.fit()
     assert result.epochs_completed == 2
     assert len(result.epoch_history) == 2
     assert result.cost_usd >= 0
+    assert "samples_per_sec" in result.epoch_history[0]
     run_file = tmp_path / ".starfelt" / "runs" / f"{result.run_id}.json"
     assert run_file.exists()
     data = json.loads(run_file.read_text())
     assert data.get("source") == "trainer_sdk"
     assert "epoch_history" in data
+    assert data.get("grad_accum_steps") == 2

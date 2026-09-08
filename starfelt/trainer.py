@@ -8,18 +8,21 @@ Usage::
         model=model,
         optimizer=optimizer,
         train_loader=train_loader,
-        loss_fn=criterion,          # optional; defaults to model output if callable
-        device="cuda",              # optional
-        epochs=10,                  # or max_steps=
+        loss_fn=criterion,
+        val_loader=val_loader,          # optional — enables val early-stop
+        epochs=10,
+        grad_accum_steps=4,             # effective larger batch
+        amp=True,
     )
-    trainer.fit()
+    result = trainer.fit()
 
-What it handles for you:
-- Automatic checkpointing
-- Early stopping via StarfeltCallback
-- Per-epoch cost + GPU util + loss / LR telemetry
-- Works standalone or under ``starfelt run`` (picks up STARFELT_RUN_ID etc.)
-- Zero required config beyond the objects you already have
+What it handles:
+- Gradient accumulation
+- Eval loop + early-stop on validation loss
+- Automatic checkpointing + resume (STARFELT_RESUME_FROM)
+- AMP, optional DataParallel
+- Per-epoch telemetry: loss, val_loss, lr, samples/sec, GPU util, memory, cost
+- Works standalone or under ``starfelt run``
 """
 
 from __future__ import annotations
@@ -28,9 +31,9 @@ import json
 import os
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterable, Iterator, Optional, Sequence
+from typing import Any, Callable, Iterable
 
 from starfelt.callbacks import StarfeltCallback
 from starfelt.core.config import StarfeltConfig, load_config
@@ -53,11 +56,14 @@ def _try_torch():
 class EpochRecord:
     epoch: int
     loss: float
-    lr: float | None
-    duration_s: float
-    cost_usd: float
-    gpu_util: float | None
-    timestamp: float
+    val_loss: float | None = None
+    lr: float | None = None
+    duration_s: float = 0.0
+    cost_usd: float = 0.0
+    gpu_util: float | None = None
+    samples_per_sec: float | None = None
+    peak_mem_mb: float | None = None
+    timestamp: float = 0.0
 
 
 @dataclass
@@ -65,20 +71,34 @@ class TrainerResult:
     run_id: str
     epochs_completed: int
     final_loss: float | None
+    final_val_loss: float | None
     duration_s: float
     cost_usd: float
     stopped_early: bool
     checkpoint_path: str | None
     epoch_history: list[dict[str, Any]]
     workload_id: str | None = None
+    best_val_loss: float | None = None
 
 
 class Trainer:
-    """High-level PyTorch training wrapper used as the viral adoption path.
+    """High-level PyTorch training wrapper — the viral adoption path.
 
-    Minimal call::
+    Minimal::
 
         Trainer(model, optimizer, train_loader, epochs=5).fit()
+
+    Real fine-tune style::
+
+        Trainer(
+            model, optimizer, train_loader,
+            loss_fn=criterion,
+            val_loader=val_loader,
+            epochs=3,
+            grad_accum_steps=4,
+            amp=True,
+            early_stop_patience=2,
+        ).fit()
     """
 
     def __init__(
@@ -100,13 +120,15 @@ class Trainer:
         run_id: str | None = None,
         log_every: int = 1,
         amp: bool = False,
+        grad_accum_steps: int = 1,
+        early_stop_patience: int | None = None,
+        eval_every_epochs: int = 1,
+        data_parallel: bool = False,
         on_epoch_end: Callable[[int, float, float], None] | None = None,
     ) -> None:
         self.torch = _try_torch()
         if self.torch is None:
-            raise ImportError(
-                "Trainer requires PyTorch. Install with: pip install torch"
-            )
+            raise ImportError("Trainer requires PyTorch. Install with: pip install torch")
 
         self.model = model
         self.optimizer = optimizer
@@ -119,52 +141,51 @@ class Trainer:
         self.checkpoint_every_epochs = max(1, checkpoint_every_epochs)
         self.log_every = max(1, log_every)
         self.amp = amp
+        self.grad_accum_steps = max(1, grad_accum_steps)
+        self.early_stop_patience = early_stop_patience
+        self.eval_every_epochs = max(1, eval_every_epochs)
         self.on_epoch_end = on_epoch_end
 
-        # Device
         if device is None:
             device = "cuda" if self.torch.cuda.is_available() else "cpu"
         self.device = self.torch.device(device)
         self.model.to(self.device)
 
-        # Config / run identity
+        if data_parallel and self.device.type == "cuda" and self.torch.cuda.device_count() > 1:
+            self.model = self.torch.nn.DataParallel(self.model)
+            self._is_dp = True
+        else:
+            self._is_dp = False
+
         try:
             self.cfg = project_config or load_config()
         except Exception:
             self.cfg = StarfeltConfig()
 
-        self.run_id = (
-            run_id
-            or os.environ.get("STARFELT_RUN_ID")
-            or uuid.uuid4().hex
-        )
+        self.run_id = run_id or os.environ.get("STARFELT_RUN_ID") or uuid.uuid4().hex
         os.environ.setdefault("STARFELT_RUN_ID", self.run_id)
 
-        # Early-stop callback
         self.callback = callback or StarfeltCallback(
-            patience_steps=self.cfg.patience_steps
-            if hasattr(self.cfg, "patience_steps")
-            else None
+            patience_steps=getattr(self.cfg, "patience_steps", None)
         )
 
-        # Checkpoint dir
         if checkpoint_dir is None:
             checkpoint_dir = Path.cwd() / ".starfelt" / "checkpoints" / self.run_id
         self.checkpoint_dir = Path(checkpoint_dir)
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-        # Telemetry / cost
         self.gpu = GpuMonitor()
         self.epoch_history: list[EpochRecord] = []
         self._t0 = time.time()
         self._step = 0
         self._stopped_early = False
         self._last_checkpoint: Path | None = None
+        self._best_val: float | None = None
+        self._val_stale = 0
         self._scaler = None
         if self.amp and self.device.type == "cuda":
             self._scaler = self.torch.cuda.amp.GradScaler()
 
-        # Resume support
         resume_path = os.environ.get("STARFELT_RESUME_FROM")
         if resume_path and Path(resume_path).exists():
             self._load_checkpoint(Path(resume_path))
@@ -174,56 +195,76 @@ class Trainer:
     # ------------------------------------------------------------------
 
     def fit(self) -> TrainerResult:
-        """Run the training loop and return a rich result object."""
         if self.epochs is None and self.max_steps is None:
             self.epochs = 1
 
         self.model.train()
         epoch = 0
-        total_epochs = self.epochs or 10_000  # safety if only max_steps
+        total_epochs = self.epochs or 10_000
 
         while epoch < total_epochs:
             if self.max_steps is not None and self._step >= self.max_steps:
                 break
 
-            ep_loss, ep_lr, ep_dur, ep_gpu = self._run_epoch(epoch)
+            train_stats = self._run_epoch(epoch)
+            val_loss = None
+            if self.val_loader is not None and (epoch + 1) % self.eval_every_epochs == 0:
+                val_loss = self._evaluate()
+
             cost_so_far = ((time.time() - self._t0) / 3600.0) * self.cfg.gpu_hour_usd
 
             rec = EpochRecord(
                 epoch=epoch,
-                loss=ep_loss,
-                lr=ep_lr,
-                duration_s=ep_dur,
+                loss=train_stats["loss"],
+                val_loss=val_loss,
+                lr=train_stats["lr"],
+                duration_s=train_stats["duration_s"],
                 cost_usd=cost_so_far,
-                gpu_util=ep_gpu,
+                gpu_util=train_stats["gpu_util"],
+                samples_per_sec=train_stats["samples_per_sec"],
+                peak_mem_mb=train_stats["peak_mem_mb"],
                 timestamp=time.time(),
             )
             self.epoch_history.append(rec)
 
             if self.on_epoch_end:
                 try:
-                    self.on_epoch_end(epoch, ep_loss, cost_so_far)
+                    self.on_epoch_end(epoch, train_stats["loss"], cost_so_far)
                 except Exception:
                     pass
-            fire_epoch_end(epoch, ep_loss, cost_so_far)
+            fire_epoch_end(epoch, train_stats["loss"], cost_so_far)
 
-            # Checkpoint
             if (epoch + 1) % self.checkpoint_every_epochs == 0:
-                path = self._save_checkpoint(epoch, ep_loss)
+                path = self._save_checkpoint(epoch, train_stats["loss"])
                 fire_checkpoint(str(path))
 
-            # Early stop (callback already may have SIGTERM'd; we also check flag)
+            # Val-based early stop
+            if val_loss is not None and self.early_stop_patience is not None:
+                if self._best_val is None or val_loss < self._best_val - 1e-4:
+                    self._best_val = val_loss
+                    self._val_stale = 0
+                    # keep best checkpoint
+                    self._save_checkpoint(epoch, train_stats["loss"], tag="best")
+                else:
+                    self._val_stale += 1
+                    if self._val_stale >= self.early_stop_patience:
+                        print(
+                            f"[starfelt] early stop — val loss stalled for "
+                            f"{self.early_stop_patience} evals (best={self._best_val:.4f})",
+                            flush=True,
+                        )
+                        self._stopped_early = True
+                        break
+
             if self.callback.stopped or self._stopped_early:
                 self._stopped_early = True
                 break
 
             epoch += 1
 
-        result = self._finalize(epochs_completed=len(self.epoch_history))
-        return result
+        return self._finalize(epochs_completed=len(self.epoch_history))
 
     def save_checkpoint(self, tag: str = "manual") -> Path:
-        """Force a checkpoint write. Returns path."""
         loss = self.epoch_history[-1].loss if self.epoch_history else 0.0
         path = self.checkpoint_dir / f"ckpt_{tag}.pt"
         self._write_ckpt(path, epoch=len(self.epoch_history), loss=loss)
@@ -234,31 +275,35 @@ class Trainer:
     # Internals
     # ------------------------------------------------------------------
 
-    def _run_epoch(self, epoch: int) -> tuple[float, float | None, float, float | None]:
+    def _run_epoch(self, epoch: int) -> dict[str, Any]:
+        self.model.train()
         t0 = time.time()
         running_loss = 0.0
         n_batches = 0
+        n_samples = 0
         last_lr: float | None = None
+        self.optimizer.zero_grad(set_to_none=True)
 
-        for batch in self.train_loader:
+        if self.device.type == "cuda":
+            self.torch.cuda.reset_peak_memory_stats()
+
+        for batch_idx, batch in enumerate(self.train_loader):
             if self.max_steps is not None and self._step >= self.max_steps:
                 break
 
-            loss_val = self._train_step(batch)
+            loss_val, batch_size = self._train_step(batch, batch_idx)
             running_loss += loss_val
             n_batches += 1
+            n_samples += batch_size
             self._step += 1
 
-            # LR
             if self.optimizer.param_groups:
                 last_lr = float(self.optimizer.param_groups[0].get("lr", 0.0))
 
-            # Callback step (early stop)
             if self.callback.step(loss_val):
                 self._stopped_early = True
                 break
 
-            # Optional GPU sample every few steps
             if self._step % 20 == 0:
                 self.gpu.poll()
 
@@ -268,81 +313,173 @@ class Trainer:
             except Exception:
                 pass
 
-        avg_loss = running_loss / max(n_batches, 1)
         duration = time.time() - t0
+        avg_loss = running_loss / max(n_batches, 1)
+        samples_per_sec = n_samples / duration if duration > 0 else None
         gpu_util = self.gpu.last.util_pct if self.gpu.last else None
+        peak_mem = None
+        if self.device.type == "cuda":
+            try:
+                peak_mem = self.torch.cuda.max_memory_allocated() / (1024 * 1024)
+            except Exception:
+                pass
 
         if (epoch + 1) % self.log_every == 0:
-            util_s = f"  gpu={gpu_util:.0f}%" if gpu_util is not None else ""
-            lr_s = f"  lr={last_lr:.2e}" if last_lr is not None else ""
-            print(
-                f"[starfelt] epoch {epoch + 1}  loss={avg_loss:.4f}{lr_s}"
-                f"  {duration:.1f}s{util_s}",
-                flush=True,
-            )
+            parts = [f"[starfelt] epoch {epoch + 1}  loss={avg_loss:.4f}"]
+            if last_lr is not None:
+                parts.append(f"lr={last_lr:.2e}")
+            parts.append(f"{duration:.1f}s")
+            if samples_per_sec is not None:
+                parts.append(f"{samples_per_sec:.0f} smp/s")
+            if gpu_util is not None:
+                parts.append(f"gpu={gpu_util:.0f}%")
+            if peak_mem is not None:
+                parts.append(f"mem={peak_mem:.0f}MB")
+            print("  ".join(parts), flush=True)
 
-        return avg_loss, last_lr, duration, gpu_util
+        return {
+            "loss": avg_loss,
+            "lr": last_lr,
+            "duration_s": duration,
+            "gpu_util": gpu_util,
+            "samples_per_sec": samples_per_sec,
+            "peak_mem_mb": peak_mem,
+        }
 
-    def _train_step(self, batch: Any) -> float:
-        self.optimizer.zero_grad(set_to_none=True)
-
-        # Unpack common batch shapes
-        if isinstance(batch, (list, tuple)) and len(batch) >= 2:
-            x, y = batch[0], batch[1]
-        else:
-            x, y = batch, None
-
+    def _train_step(self, batch: Any, batch_idx: int) -> tuple[float, int]:
+        x, y, batch_size = self._unpack_batch(batch)
         x = self._to_device(x)
         if y is not None:
             y = self._to_device(y)
 
         if self.amp and self._scaler is not None:
             with self.torch.cuda.amp.autocast():
-                loss = self._compute_loss(x, y)
+                loss = self._compute_loss(x, y) / self.grad_accum_steps
             self._scaler.scale(loss).backward()
-            self._scaler.step(self.optimizer)
-            self._scaler.update()
+            if (batch_idx + 1) % self.grad_accum_steps == 0:
+                self._scaler.step(self.optimizer)
+                self._scaler.update()
+                self.optimizer.zero_grad(set_to_none=True)
         else:
-            loss = self._compute_loss(x, y)
+            loss = self._compute_loss(x, y) / self.grad_accum_steps
             loss.backward()
-            self.optimizer.step()
+            if (batch_idx + 1) % self.grad_accum_steps == 0:
+                self.optimizer.step()
+                self.optimizer.zero_grad(set_to_none=True)
 
-        return float(loss.detach().item())
+        return float(loss.detach().item() * self.grad_accum_steps), batch_size
+
+    def _evaluate(self) -> float:
+        self.model.eval()
+        total = 0.0
+        n = 0
+        with self.torch.no_grad():
+            for batch in self.val_loader:
+                x, y, bs = self._unpack_batch(batch)
+                x = self._to_device(x)
+                if y is not None:
+                    y = self._to_device(y)
+                if self.amp and self.device.type == "cuda":
+                    with self.torch.cuda.amp.autocast():
+                        loss = self._compute_loss(x, y)
+                else:
+                    loss = self._compute_loss(x, y)
+                total += float(loss.item()) * bs
+                n += bs
+        self.model.train()
+        avg = total / max(n, 1)
+        print(f"[starfelt]          val_loss={avg:.4f}", flush=True)
+        return avg
+
+    def _unpack_batch(self, batch: Any) -> tuple[Any, Any, int]:
+        if isinstance(batch, (list, tuple)) and len(batch) >= 2:
+            x, y = batch[0], batch[1]
+        elif isinstance(batch, dict):
+            # HF-style batch
+            y = batch.get("labels") or batch.get("label")
+            x = {k: v for k, v in batch.items() if k not in ("labels", "label")}
+            if len(x) == 1:
+                x = next(iter(x.values()))
+        else:
+            x, y = batch, None
+
+        batch_size = 1
+        try:
+            if hasattr(x, "size"):
+                batch_size = int(x.size(0))
+            elif isinstance(x, dict):
+                for v in x.values():
+                    if hasattr(v, "size"):
+                        batch_size = int(v.size(0))
+                        break
+            elif isinstance(x, (list, tuple)) and x:
+                batch_size = len(x)
+        except Exception:
+            pass
+        return x, y, batch_size
 
     def _compute_loss(self, x: Any, y: Any) -> Any:
         if self.loss_fn is not None:
-            out = self.model(x)
+            if isinstance(x, dict):
+                out = self.model(**x)
+            else:
+                out = self.model(x)
+            # HF models often return an object with .loss
+            if hasattr(out, "loss") and out.loss is not None and y is None:
+                return out.loss
+            if hasattr(out, "logits"):
+                out = out.logits
             return self.loss_fn(out, y)
-        # Assume model returns loss when called with (x, y) or just x
+        if isinstance(x, dict):
+            out = self.model(**x)
+            if hasattr(out, "loss") and out.loss is not None:
+                return out.loss
         if y is not None:
             try:
                 return self.model(x, y)
             except TypeError:
                 out = self.model(x)
-                # last-ditch: if model already returns scalar loss
+                if hasattr(out, "loss"):
+                    return out.loss
                 if out.ndim == 0:
                     return out
                 raise
         out = self.model(x)
+        if hasattr(out, "loss") and out.loss is not None:
+            return out.loss
         if out.ndim == 0:
             return out
         raise RuntimeError(
-            "Trainer: provide loss_fn= or make model(x) / model(x, y) return a scalar loss"
+            "Trainer: provide loss_fn= or make model return a scalar loss / .loss"
         )
 
     def _to_device(self, obj: Any) -> Any:
+        if isinstance(obj, dict):
+            return {k: self._to_device(v) for k, v in obj.items()}
         if hasattr(obj, "to"):
             return obj.to(self.device)
         if isinstance(obj, (list, tuple)):
             return type(obj)(self._to_device(o) for o in obj)
         return obj
 
-    def _save_checkpoint(self, epoch: int, loss: float) -> Path:
-        path = self.checkpoint_dir / f"epoch_{epoch:04d}.pt"
+    def _model_state(self) -> dict:
+        m = self.model.module if self._is_dp else self.model
+        return m.state_dict()
+
+    def _load_model_state(self, state: dict) -> None:
+        m = self.model.module if self._is_dp else self.model
+        m.load_state_dict(state)
+
+    def _save_checkpoint(self, epoch: int, loss: float, tag: str | None = None) -> Path:
+        if tag:
+            path = self.checkpoint_dir / f"{tag}.pt"
+        else:
+            path = self.checkpoint_dir / f"epoch_{epoch:04d}.pt"
         self._write_ckpt(path, epoch=epoch, loss=loss)
-        # Also keep a "latest"
-        latest = self.checkpoint_dir / "latest.pt"
-        self._write_ckpt(latest, epoch=epoch, loss=loss)
+        try:
+            self._write_ckpt(self.checkpoint_dir / "latest.pt", epoch=epoch, loss=loss)
+        except Exception:
+            pass
         self._last_checkpoint = path
         return path
 
@@ -350,28 +487,31 @@ class Trainer:
         state = {
             "epoch": epoch,
             "step": self._step,
-            "model": self.model.state_dict(),
+            "model": self._model_state(),
             "optimizer": self.optimizer.state_dict(),
             "loss": loss,
             "run_id": self.run_id,
-            "epoch_history": [r.__dict__ for r in self.epoch_history],
+            "best_val": self._best_val,
+            "epoch_history": [asdict(r) for r in self.epoch_history],
         }
         if self.scheduler is not None and hasattr(self.scheduler, "state_dict"):
             state["scheduler"] = self.scheduler.state_dict()
         if self._scaler is not None:
             state["scaler"] = self._scaler.state_dict()
-        self.torch.save(state, path)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        self.torch.save(state, tmp)
+        tmp.replace(path)
 
     def _load_checkpoint(self, path: Path) -> None:
         ckpt = self.torch.load(path, map_location=self.device, weights_only=False)
-        self.model.load_state_dict(ckpt["model"])
+        self._load_model_state(ckpt["model"])
         self.optimizer.load_state_dict(ckpt["optimizer"])
         self._step = int(ckpt.get("step", 0))
+        self._best_val = ckpt.get("best_val")
         if self.scheduler is not None and "scheduler" in ckpt:
             self.scheduler.load_state_dict(ckpt["scheduler"])
         if self._scaler is not None and "scaler" in ckpt:
             self._scaler.load_state_dict(ckpt["scaler"])
-        # Restore history if present
         for raw in ckpt.get("epoch_history") or []:
             self.epoch_history.append(EpochRecord(**raw))
         print(f"[starfelt] resumed from {path}  step={self._step}", flush=True)
@@ -382,29 +522,11 @@ class Trainer:
         cost = hours * self.cfg.gpu_hour_usd
         baseline = cost * self.cfg.baseline_multiplier
         final_loss = self.epoch_history[-1].loss if self.epoch_history else None
+        final_val = self.epoch_history[-1].val_loss if self.epoch_history else None
 
-        # Build per-epoch telemetry payload
-        epoch_rows = [
-            {
-                "epoch": r.epoch,
-                "loss": r.loss,
-                "lr": r.lr,
-                "duration_s": r.duration_s,
-                "cost_usd": r.cost_usd,
-                "gpu_util": r.gpu_util,
-                "ts": r.timestamp,
-            }
-            for r in self.epoch_history
-        ]
+        epoch_rows = [asdict(r) for r in self.epoch_history]
 
-        # Infer simple hints
-        batch_size = None
-        try:
-            # common DataLoader attribute
-            batch_size = getattr(self.train_loader, "batch_size", None)
-        except Exception:
-            pass
-
+        batch_size = getattr(self.train_loader, "batch_size", None)
         hints = TelemetryHints(
             framework="pytorch",
             frameworks_detected=["pytorch"],
@@ -417,10 +539,14 @@ class Trainer:
             ),
             optimization_flags=["amp"] if self.amp else [],
         )
+        if self.grad_accum_steps > 1:
+            hints.optimization_flags.append(f"grad_accum_{self.grad_accum_steps}")
+        if self._is_dp:
+            hints.optimization_flags.append("data_parallel")
 
-        # Model param count
         try:
-            param_count = sum(p.numel() for p in self.model.parameters())
+            m = self.model.module if self._is_dp else self.model
+            param_count = sum(p.numel() for p in m.parameters())
         except Exception:
             param_count = None
 
@@ -453,11 +579,13 @@ class Trainer:
                 "stopped_early": self._stopped_early,
                 "epoch_history": epoch_rows,
                 "final_loss": final_loss,
+                "final_val_loss": final_val,
+                "best_val_loss": self._best_val,
                 "checkpoint": str(self._last_checkpoint) if self._last_checkpoint else None,
+                "grad_accum_steps": self.grad_accum_steps,
             },
         )
 
-        # Persist like CostTracker does
         hist_path = Path.cwd() / ".starfelt" / "history.json"
         hist = load_history()
         hist.append(row)
@@ -471,10 +599,12 @@ class Trainer:
             run_id=self.run_id,
             epochs_completed=epochs_completed,
             final_loss=final_loss,
+            final_val_loss=final_val,
             duration_s=duration_s,
             cost_usd=cost,
             stopped_early=self._stopped_early,
             checkpoint_path=str(self._last_checkpoint) if self._last_checkpoint else None,
             epoch_history=epoch_rows,
             workload_id=wl,
+            best_val_loss=self._best_val,
         )
