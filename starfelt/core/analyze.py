@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import ast
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from starfelt.core.config import StarfeltConfig
+from starfelt.core.telemetry import TelemetryHints
 
 
 @dataclass
@@ -20,6 +21,7 @@ class AnalysisReport:
     est_hours: float
     est_cost_usd: float
     est_cost_optimized_usd: float
+    telemetry: TelemetryHints = field(default_factory=TelemetryHints)
 
 
 class _TrainVisitor(ast.NodeVisitor):
@@ -33,6 +35,22 @@ class _TrainVisitor(ast.NodeVisitor):
         self.has_scheduler = False
         self.has_torch_optim = False
         self.argparse_defaults: dict[str, float | int] = {}
+        self.imports: set[str] = set()
+        self.dataset_size: int | None = None
+        self.optimization_flags: list[str] = []
+
+    def visit_Import(self, node: ast.Import) -> None:
+        for alias in node.names:
+            self.imports.add(alias.name.split(".")[0])
+        self.generic_visit(node)
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        if node.module:
+            root = node.module.split(".")[0]
+            self.imports.add(root)
+            if node.module.startswith("torch.cuda.amp") or "amp" in (node.module or ""):
+                self.optimization_flags.append("amp")
+        self.generic_visit(node)
 
     def visit_Assign(self, node: ast.Assign) -> None:
         if len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
@@ -41,6 +59,15 @@ class _TrainVisitor(ast.NodeVisitor):
             if val is not None:
                 self.assigns[name] = val
                 self._bind_known(name, val)
+            # len(...) assignment
+            size = self._len_call(node.value)
+            if size is not None and name.lower() in {
+                "dataset_size",
+                "n_samples",
+                "num_samples",
+                "data_len",
+            }:
+                self.dataset_size = size
         self.generic_visit(node)
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
@@ -66,10 +93,8 @@ class _TrainVisitor(ast.NodeVisitor):
                             av = self.assigns[kw.value.id]
                             if isinstance(av, int):
                                 self.dataloader_num_workers = av
-            if "lr_scheduler" in low or low.endswith("scheduler") or "scheduler" in low:
-                # avoid false positive on random *scheduler* if too broad — torch.optim.lr_scheduler.*
-                if "scheduler" in low:
-                    self.has_scheduler = True
+            if "scheduler" in low:
+                self.has_scheduler = True
             if low.startswith("torch.optim.") or low in {
                 "adam",
                 "adamw",
@@ -82,7 +107,6 @@ class _TrainVisitor(ast.NodeVisitor):
                         v = self._resolve_value(kw.value)
                         if isinstance(v, (int, float)):
                             self.lr = float(v)
-                # positional lr for SGD(params, lr)
                 if self.lr is None and len(node.args) >= 2:
                     v = self._resolve_value(node.args[1])
                     if isinstance(v, (int, float)):
@@ -91,10 +115,40 @@ class _TrainVisitor(ast.NodeVisitor):
             if low in {"add_argument"} or fname.endswith("add_argument"):
                 self._parse_add_argument(node)
 
+            # torch.compile(...)
+            if low.endswith("compile") and "torch" in low:
+                self.optimization_flags.append("torch.compile")
+            if "autocast" in low:
+                self.optimization_flags.append("amp")
+            if "gradscaler" in low or low.endswith("gradscaler"):
+                self.optimization_flags.append("grad_scaler")
+
+            # len(dataset) or len(dataloader.dataset) used as call in expression
+            if low == "len" and node.args:
+                size = self._len_from_arg(node.args[0])
+                if size is not None:
+                    self.dataset_size = size
+
         self.generic_visit(node)
 
+    def _len_call(self, node: ast.AST) -> int | None:
+        if isinstance(node, ast.Call) and self._call_name(node) == "len" and node.args:
+            return self._len_from_arg(node.args[0])
+        return None
+
+    def _len_from_arg(self, arg: ast.AST) -> int | None:
+        # len(something) where something is a list/tuple literal
+        if isinstance(arg, (ast.List, ast.Tuple)):
+            return len(arg.elts)
+        # len(range(N))
+        if isinstance(arg, ast.Call) and self._call_name(arg) == "range":
+            if arg.args and isinstance(arg.args[0], ast.Constant) and isinstance(
+                arg.args[0].value, int
+            ):
+                return int(arg.args[0].value)
+        return None
+
     def _parse_add_argument(self, node: ast.Call) -> None:
-        # argparse: add_argument("--lr", type=float, default=3e-4)
         flag = None
         if node.args and isinstance(node.args[0], ast.Constant):
             flag = str(node.args[0].value)
@@ -119,6 +173,8 @@ class _TrainVisitor(ast.NodeVisitor):
             self.epochs = int(val)
         if n == "num_workers":
             self.dataloader_num_workers = int(val)
+        if n in {"dataset_size", "n_samples", "num_samples"}:
+            self.dataset_size = int(val)
 
     def _resolve_value(self, node: ast.AST) -> float | int | str | None:
         lit = self._literal(node)
@@ -133,7 +189,6 @@ class _TrainVisitor(ast.NodeVisitor):
         if isinstance(node, ast.Constant):
             if isinstance(node.value, (int, float, str)):
                 return node.value
-        # Python 3.10 compatibility for older ast
         if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
             v = _TrainVisitor._literal(node.operand)
             if isinstance(v, (int, float)):
@@ -153,6 +208,20 @@ class _TrainVisitor(ast.NodeVisitor):
         return None
 
 
+def detect_frameworks(imports: set[str]) -> tuple[str, list[str]]:
+    found: list[str] = []
+    if "torch" in imports:
+        found.append("pytorch")
+    if "jax" in imports or "flax" in imports:
+        found.append("jax")
+    if "tensorflow" in imports or "tf" in imports:
+        found.append("tensorflow")
+    if "keras" in imports:
+        found.append("keras")
+    primary = found[0] if found else "unknown"
+    return primary, found
+
+
 def analyze_script(script: Path, cfg: StarfeltConfig) -> AnalysisReport:
     text = script.read_text(encoding="utf-8", errors="replace")
     checks: list[Check] = []
@@ -167,19 +236,33 @@ def analyze_script(script: Path, cfg: StarfeltConfig) -> AnalysisReport:
             est_hours=0.1,
             est_cost_usd=0.1 * cfg.gpu_hour_usd,
             est_cost_optimized_usd=0.1 * cfg.gpu_hour_usd / cfg.baseline_multiplier,
+            telemetry=TelemetryHints(),
         )
 
     visitor = _TrainVisitor()
     visitor.visit(tree)
+
+    primary, frameworks = detect_frameworks(visitor.imports)
+    if primary == "unknown":
+        checks.append(
+            Check("framework", "warn", "No torch/jax/tensorflow/keras import detected")
+        )
+    else:
+        checks.append(
+            Check(
+                "framework",
+                "ok",
+                f"{primary}"
+                + (f" (+{', '.join(frameworks[1:])})" if len(frameworks) > 1 else ""),
+            )
+        )
 
     batch = visitor.batch_size
     lr = visitor.lr
     epochs = visitor.epochs
 
     if batch is None:
-        checks.append(
-            Check("batch_size", "warn", "No batch_size assignment found in AST")
-        )
+        checks.append(Check("batch_size", "warn", "No batch_size assignment found in AST"))
     elif batch < 8:
         checks.append(
             Check(
@@ -237,9 +320,7 @@ def analyze_script(script: Path, cfg: StarfeltConfig) -> AnalysisReport:
                 detail += f" (num_workers={visitor.dataloader_num_workers})"
             checks.append(Check("data_pipeline", "ok", detail))
     else:
-        checks.append(
-            Check("data_pipeline", "warn", "No DataLoader() call found in AST")
-        )
+        checks.append(Check("data_pipeline", "warn", "No DataLoader() call found in AST"))
 
     if visitor.has_scheduler:
         checks.append(Check("scheduler", "ok", "LR scheduler usage detected"))
@@ -254,12 +335,38 @@ def analyze_script(script: Path, cfg: StarfeltConfig) -> AnalysisReport:
 
     if visitor.has_torch_optim:
         checks.append(Check("optimizer", "ok", "torch.optim-style optimizer detected"))
+    elif primary == "pytorch":
+        checks.append(
+            Check("optimizer", "warn", "PyTorch import but no torch.optim call found")
+        )
     else:
         checks.append(
             Check(
                 "optimizer",
                 "warn",
                 "No torch.optim optimizer call found (ok if custom / non-PyTorch)",
+            )
+        )
+
+    if visitor.dataset_size is not None:
+        checks.append(
+            Check("dataset_size", "ok", f"estimated dataset_size={visitor.dataset_size}")
+        )
+    else:
+        checks.append(
+            Check(
+                "dataset_size",
+                "warn",
+                "Could not infer dataset size (len(...) / dataset_size assign)",
+            )
+        )
+
+    if visitor.optimization_flags:
+        checks.append(
+            Check(
+                "optimizations",
+                "ok",
+                "flags: " + ", ".join(sorted(set(visitor.optimization_flags))),
             )
         )
 
@@ -276,9 +383,20 @@ def analyze_script(script: Path, cfg: StarfeltConfig) -> AnalysisReport:
         )
     )
 
+    telem = TelemetryHints(
+        framework=primary,
+        frameworks_detected=frameworks,
+        batch_size=batch,
+        epochs=epochs,
+        learning_rate=lr,
+        dataset_size=visitor.dataset_size,
+        optimization_flags=sorted(set(visitor.optimization_flags)),
+    )
+
     return AnalysisReport(
         checks=checks,
         est_hours=est_hours,
         est_cost_usd=est_cost,
         est_cost_optimized_usd=est_opt,
+        telemetry=telem,
     )

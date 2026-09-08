@@ -61,6 +61,7 @@ starfelt status --watch
 - Optional GPU util via `nvidia-smi`
 - `StarfeltCallback` for early-stop in PyTorch loops
 - Interrupt markers on SIGINT/SIGTERM
+- Run telemetry + `workload_id` fingerprints (see `docs/TELEMETRY.md`)
 
 ## What Stage 1 is not
 

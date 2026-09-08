@@ -123,6 +123,10 @@ def run_cmd(
         lines.append(f"Avg GPU util: {result.gpu_util_avg:.0f}%")
     if result.interrupted:
         lines.append("Interrupted: marker written under .starfelt/runs/")
+    if result.framework:
+        lines.append(f"Framework: {result.framework}")
+    if result.workload_id:
+        lines.append(f"Workload: {result.workload_id}")
     lines.append(f"Run id: {result.run_id}")
     console.print(
         Panel(
