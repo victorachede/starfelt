@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from starfelt.core.config import StarfeltConfig
+from starfelt.core.telemetry import TelemetryHints, build_run_telemetry
 
 
 def _runs_dir() -> Path:
@@ -27,23 +28,40 @@ class CostTracker:
         self.t0 = time.time()
         self.extras: dict[str, Any] = {}
 
-    def finish(self, exit_code: int, **extra: Any) -> dict[str, Any]:
+    def finish(
+        self,
+        exit_code: int,
+        *,
+        hints: TelemetryHints | None = None,
+        model_param_count: int | None = None,
+        gpu_name: str | None = None,
+        gpu_util_avg: float | None = None,
+        gpu_samples: int | None = None,
+        interrupted: str | None = None,
+        **extra: Any,
+    ) -> dict[str, Any]:
+        """Persist run record with real duration/cost, then full telemetry."""
         duration_s = time.time() - self.t0
         hours = duration_s / 3600.0
         cost = hours * self.cfg.gpu_hour_usd
         baseline = cost * self.cfg.baseline_multiplier
-        row: dict[str, Any] = {
-            "run_id": self.run_id,
-            "script": self.script,
-            "duration_s": duration_s,
-            "cost_usd": cost,
-            "baseline_cost_usd": baseline,
-            "saved_usd": baseline - cost,
-            "exit_code": exit_code,
-            "ts": time.time(),
-        }
-        row.update(self.extras)
-        row.update(extra)
+
+        row = build_run_telemetry(
+            run_id=self.run_id,
+            script=self.script,
+            duration_s=duration_s,
+            cost_usd=cost,
+            baseline_cost_usd=baseline,
+            exit_code=exit_code,
+            hints=hints,
+            model_param_count=model_param_count,
+            gpu_name=gpu_name,
+            gpu_util_avg=gpu_util_avg,
+            gpu_samples=gpu_samples,
+            interrupted=interrupted,
+            extra={**self.extras, **extra, "ts": time.time()},
+        )
+
         path = _history_path()
         hist = load_history()
         hist.append(row)
