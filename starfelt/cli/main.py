@@ -344,5 +344,383 @@ def sync_cmd() -> None:
         raise SystemExit(1)
 
 
+# ---------------------------------------------------------------------------
+# Batch 5 — inspect / compare / resume / benchmark / config doctor
+# ---------------------------------------------------------------------------
+
+
+def _find_run(run_id: str) -> dict | None:
+    """Resolve full or prefix run_id from history or individual run files."""
+    history = load_history()
+    for row in reversed(history):
+        rid = str(row.get("run_id", ""))
+        if rid == run_id or rid.startswith(run_id):
+            return row
+    runs_dir = Path.cwd() / ".starfelt" / "runs"
+    if runs_dir.exists():
+        for p in runs_dir.glob("*.json"):
+            if p.stem == run_id or p.stem.startswith(run_id):
+                try:
+                    return json.loads(p.read_text(encoding="utf-8"))
+                except json.JSONDecodeError:
+                    continue
+    return None
+
+
+@cli.command("inspect")
+@click.argument("run_id")
+@click.option("--json", "as_json", is_flag=True, help="Dump full telemetry JSON")
+def inspect_cmd(run_id: str, as_json: bool) -> None:
+    """Deep dive into a single run — telemetry, loss curve, cost, recommendations."""
+    row = _find_run(run_id)
+    if row is None:
+        console.print(f"[red]No run found matching[/] {run_id}")
+        raise SystemExit(1)
+
+    if as_json:
+        click.echo(json.dumps(row, indent=2))
+        return
+
+    rid = str(row.get("run_id", "?"))
+    console.print(Panel(f"[bold]{rid}[/]", title="Run", border_style="cyan"))
+
+    table = Table(show_header=False, box=None)
+    table.add_column("k", style="dim")
+    table.add_column("v")
+    table.add_row("Script", str(row.get("script", "—")))
+    table.add_row("Framework", str(row.get("framework", "—")))
+    table.add_row("Duration", f"{row.get('duration_s', 0):.1f}s")
+    table.add_row("Cost", f"${float(row.get('cost_usd') or 0):.4f}")
+    table.add_row("Baseline", f"${float(row.get('baseline_cost_usd') or 0):.4f}")
+    table.add_row("Saved", f"${float(row.get('saved_usd') or 0):.4f}")
+    table.add_row("Exit", str(row.get("exit_code", "—")))
+    table.add_row("Workload", str(row.get("workload_id", "—")))
+    if row.get("interrupted"):
+        table.add_row("Interrupted", str(row["interrupted"]))
+    if row.get("gpu_name"):
+        util = row.get("gpu_util_avg")
+        util_s = f" · avg util {util:.0f}%" if util is not None else ""
+        table.add_row("GPU", f"{row['gpu_name']}{util_s}")
+    if row.get("batch_size") is not None:
+        table.add_row("Batch size", str(row["batch_size"]))
+    if row.get("epochs") is not None:
+        table.add_row("Epochs", str(row["epochs"]))
+    if row.get("learning_rate") is not None:
+        table.add_row("LR", f"{row['learning_rate']}")
+    if row.get("optimization_flags"):
+        table.add_row("Opts", ", ".join(row["optimization_flags"]))
+    if row.get("source"):
+        table.add_row("Source", str(row["source"]))
+    console.print(table)
+
+    history = row.get("epoch_history") or []
+    if history:
+        console.print()
+        ep_table = Table(title="Per-epoch telemetry", header_style="bold")
+        ep_table.add_column("Epoch")
+        ep_table.add_column("Loss")
+        ep_table.add_column("LR")
+        ep_table.add_column("Duration")
+        ep_table.add_column("Cost so far")
+        ep_table.add_column("GPU %")
+        for e in history:
+            ep_table.add_row(
+                str(e.get("epoch", "")),
+                f"{e.get('loss', 0):.4f}",
+                f"{e.get('lr'):.2e}" if e.get("lr") is not None else "—",
+                f"{e.get('duration_s', 0):.1f}s",
+                f"${e.get('cost_usd', 0):.4f}",
+                f"{e.get('gpu_util'):.0f}" if e.get("gpu_util") is not None else "—",
+            )
+        console.print(ep_table)
+
+    console.print()
+    flags = row.get("optimization_flags") or []
+    recs = []
+    if "amp" not in flags and row.get("framework") == "pytorch":
+        recs.append("Enable mixed precision (AMP) — often 1.3–1.8× throughput")
+    if (row.get("gpu_util_avg") or 100) < 40:
+        recs.append("Low GPU util — check DataLoader num_workers / prefetch")
+    if row.get("batch_size") and int(row["batch_size"]) < 16:
+        recs.append("Small batch size — try larger if memory allows")
+    if not recs:
+        recs.append("No obvious extra wins from static signals")
+    console.print(
+        Panel(
+            "\n".join(f"• {r}" for r in recs),
+            title="What Starfelt would try next",
+            border_style="yellow",
+        )
+    )
+
+
+@cli.command("compare")
+@click.argument("run_id_1")
+@click.argument("run_id_2")
+def compare_cmd(run_id_1: str, run_id_2: str) -> None:
+    """Side-by-side comparison of two runs (cost, duration, efficiency)."""
+    a = _find_run(run_id_1)
+    b = _find_run(run_id_2)
+    if a is None:
+        console.print(f"[red]No run matching[/] {run_id_1}")
+        raise SystemExit(1)
+    if b is None:
+        console.print(f"[red]No run matching[/] {run_id_2}")
+        raise SystemExit(1)
+
+    def _f(row: dict, key: str, default: float = 0.0) -> float:
+        return float(row.get(key) or default)
+
+    table = Table(title="Run comparison", header_style="bold")
+    table.add_column("Metric")
+    table.add_column(str(a.get("run_id", "?"))[:10], justify="right")
+    table.add_column(str(b.get("run_id", "?"))[:10], justify="right")
+    table.add_column("Winner")
+
+    metrics = [
+        ("Cost ($)", "cost_usd", True),
+        ("Duration (s)", "duration_s", True),
+        ("GPU util %", "gpu_util_avg", False),
+        ("Saved ($)", "saved_usd", False),
+        ("Exit code", "exit_code", True),
+    ]
+    for label, key, lower_better in metrics:
+        va, vb = _f(a, key), _f(b, key)
+        if key == "exit_code":
+            winner = "A" if va == 0 and vb != 0 else ("B" if vb == 0 and va != 0 else "—")
+        elif va == vb:
+            winner = "tie"
+        elif lower_better:
+            winner = "A" if va < vb else "B"
+        else:
+            winner = "A" if va > vb else "B"
+        fmt = (lambda v: str(int(v))) if key == "exit_code" else (lambda v: f"{v:.4f}")
+        table.add_row(label, fmt(va), fmt(vb), winner)
+
+    table.add_row("Framework", str(a.get("framework", "—")), str(b.get("framework", "—")), "—")
+    table.add_row("Batch", str(a.get("batch_size", "—")), str(b.get("batch_size", "—")), "—")
+    table.add_row("Epochs", str(a.get("epochs", "—")), str(b.get("epochs", "—")), "—")
+    table.add_row("LR", str(a.get("learning_rate", "—")), str(b.get("learning_rate", "—")), "—")
+    console.print(table)
+
+    ca, cb = _f(a, "cost_usd"), _f(b, "cost_usd")
+    if ca < cb:
+        pct = ((cb - ca) / cb * 100) if cb else 0
+        console.print(f"\n[green]Run A was cheaper by ${cb - ca:.4f} ({pct:.0f}%)[/]")
+    elif cb < ca:
+        pct = ((ca - cb) / ca * 100) if ca else 0
+        console.print(f"\n[green]Run B was cheaper by ${ca - cb:.4f} ({pct:.0f}%)[/]")
+    else:
+        console.print("\n[dim]Same tracked cost[/]")
+
+
+@cli.command("resume")
+@click.argument("run_id")
+@click.option(
+    "--script",
+    "script_path",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False),
+    help="Override script path",
+)
+@click.option("--force", is_flag=True)
+def resume_cmd(run_id: str, script_path: str | None, force: bool) -> None:
+    """Resume an interrupted or checkpointed run.
+
+    Finds the last checkpoint under .starfelt/checkpoints/{run_id}/ and
+    re-launches the script with STARFELT_RESUME_FROM set.
+    """
+    import os as _os
+
+    row = _find_run(run_id)
+    if row is None:
+        console.print(f"[red]No run found matching[/] {run_id}")
+        raise SystemExit(1)
+
+    full_id = str(row["run_id"])
+    ckpt_dir = Path.cwd() / ".starfelt" / "checkpoints" / full_id
+    latest = ckpt_dir / "latest.pt"
+    if not latest.exists():
+        candidates = sorted(ckpt_dir.glob("epoch_*.pt")) if ckpt_dir.exists() else []
+        if not candidates:
+            console.print(f"[red]No checkpoint found under[/] {ckpt_dir}")
+            console.print("Tip: use the Trainer SDK or write checkpoints yourself.")
+            raise SystemExit(1)
+        latest = candidates[-1]
+
+    script = Path(script_path) if script_path else Path(str(row.get("script", "")))
+    if not script.exists() or str(script) in {"starfelt.Trainer", ""}:
+        console.print(
+            "[yellow]Original script path missing or was Trainer SDK.[/]\n"
+            "Pass --script path/to/train.py explicitly."
+        )
+        raise SystemExit(1)
+
+    console.print(f"[cyan]Resuming[/] {full_id[:12]}… from {latest}")
+    cfg = load_config()
+    backup = dict(_os.environ)
+    try:
+        _os.environ["STARFELT_RESUME_FROM"] = str(latest.resolve())
+        _os.environ["STARFELT_RUN_ID"] = full_id
+        result = run_wrapped(script, [], cfg, force=force, confirm_fails=not force)
+    finally:
+        _os.environ.clear()
+        _os.environ.update(backup)
+
+    if result.aborted:
+        raise SystemExit(2)
+    console.print(
+        Panel(
+            f"Exit: {result.exit_code}\nDuration (this segment): {result.duration_s:.1f}s\n"
+            f"Cost (this segment): ${result.cost_usd:.4f}\nRun id: {result.run_id}",
+            title="Resume complete",
+            border_style="green" if result.exit_code == 0 else "red",
+        )
+    )
+
+
+@cli.command("benchmark")
+@click.option("--steps", default=50, show_default=True, help="Mini training steps")
+@click.option("--batch-size", default=32, show_default=True)
+def benchmark_cmd(steps: int, batch_size: int) -> None:
+    """Run a standardized mini job and report effective throughput vs catalog."""
+    try:
+        import torch
+        import torch.nn as nn
+    except ImportError:
+        console.print("[red]PyTorch required for benchmark[/]")
+        raise SystemExit(1)
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model = nn.Sequential(
+        nn.Linear(512, 512),
+        nn.ReLU(),
+        nn.Linear(512, 512),
+        nn.ReLU(),
+        nn.Linear(512, 10),
+    ).to(device)
+    opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+    x = torch.randn(batch_size, 512, device=device)
+    y = torch.randint(0, 10, (batch_size,), device=device)
+    loss_fn = nn.CrossEntropyLoss()
+
+    for _ in range(5):
+        opt.zero_grad(set_to_none=True)
+        loss = loss_fn(model(x), y)
+        loss.backward()
+        opt.step()
+    if device == "cuda":
+        torch.cuda.synchronize()
+
+    t0 = time.time()
+    for _ in range(steps):
+        opt.zero_grad(set_to_none=True)
+        loss = loss_fn(model(x), y)
+        loss.backward()
+        opt.step()
+    if device == "cuda":
+        torch.cuda.synchronize()
+    elapsed = time.time() - t0
+
+    steps_per_s = steps / elapsed
+    samples_per_s = steps_per_s * batch_size
+
+    from starfelt.providers.base import CATALOG_WARNING
+
+    cfg = load_config()
+    console.print(
+        Panel(
+            f"Device: [bold]{device}[/]\n"
+            f"Steps: {steps} · batch={batch_size}\n"
+            f"Elapsed: {elapsed:.2f}s\n"
+            f"Throughput: [bold]{steps_per_s:.1f}[/] steps/s  ·  "
+            f"[bold]{samples_per_s:.0f}[/] samples/s\n"
+            f"Configured gpu_hour_usd: ${cfg.gpu_hour_usd:.2f}",
+            title="starfelt benchmark",
+            border_style="cyan",
+        )
+    )
+    console.print(f"[dim]{CATALOG_WARNING}[/]")
+    if device == "cuda":
+        suggested = max(0.4, min(3.5, 1.2 * (250 / max(samples_per_s, 1))))
+        console.print(
+            f"Suggested [cyan]cost.gpu_hour_usd[/] for this machine ≈ "
+            f"[bold]${suggested:.2f}[/] (heuristic — measure real provider bills)"
+        )
+    else:
+        console.print("[yellow]CPU-only — set gpu_hour_usd to your actual instance rate[/]")
+
+
+@cli.command("config")
+@click.argument("subcommand", type=click.Choice(["doctor"]))
+def config_cmd(subcommand: str) -> None:
+    """Config utilities. Currently: [cyan]starfelt config doctor[/]."""
+    if subcommand == "doctor":
+        _config_doctor()
+
+
+def _config_doctor() -> None:
+    """Validate starfelt.yaml against the live environment and price catalog."""
+    from starfelt.providers.base import CATALOG, pick_cheapest
+
+    try:
+        cfg = load_config()
+    except Exception as e:
+        console.print(f"[red]Failed to load config:[/] {e}")
+        raise SystemExit(1)
+
+    table = Table(title="starfelt config doctor", header_style="bold")
+    table.add_column("Check")
+    table.add_column("Status")
+    table.add_column("Detail")
+
+    rates = [o.usd_per_hour for o in CATALOG]
+    lo, hi = min(rates), max(rates)
+    if lo * 0.5 <= cfg.gpu_hour_usd <= hi * 1.5:
+        table.add_row(
+            "gpu_hour_usd",
+            "[green]ok[/]",
+            f"${cfg.gpu_hour_usd:.2f} within catalog band ${lo:.2f}–${hi:.2f}",
+        )
+    else:
+        table.add_row(
+            "gpu_hour_usd",
+            "[yellow]warn[/]",
+            f"${cfg.gpu_hour_usd:.2f} outside typical catalog ${lo:.2f}–${hi:.2f} — "
+            "run [cyan]starfelt benchmark[/]",
+        )
+
+    if cfg.budget_usd_per_run <= 0:
+        table.add_row("budget_usd_per_run", "[red]fail[/]", "must be > 0")
+    else:
+        hours_affordable = cfg.budget_usd_per_run / cfg.gpu_hour_usd
+        table.add_row(
+            "budget_usd_per_run",
+            "[green]ok[/]",
+            f"${cfg.budget_usd_per_run:.0f} ≈ {hours_affordable:.1f} GPU-hours at current rate",
+        )
+
+    try:
+        best = pick_cheapest(cfg.preferred_providers, allow_spot=cfg.allow_spot)
+        table.add_row(
+            "preferred providers",
+            "[green]ok[/]",
+            f"cheapest match right now: {best.name} {best.gpu} @ ${best.usd_per_hour:.2f}/hr",
+        )
+    except Exception as e:
+        table.add_row("preferred providers", "[yellow]warn[/]", str(e))
+
+    if cfg.patience_steps < 10:
+        table.add_row("patience_steps", "[yellow]warn[/]", f"{cfg.patience_steps} is very low")
+    else:
+        table.add_row("patience_steps", "[green]ok[/]", str(cfg.patience_steps))
+
+    console.print(table)
+    console.print(
+        "[dim]Tip: after changing hardware, re-run [cyan]starfelt benchmark[/] "
+        "and update cost.gpu_hour_usd[/]"
+    )
+
+
 if __name__ == "__main__":
     cli()

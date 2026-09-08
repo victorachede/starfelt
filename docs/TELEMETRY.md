@@ -33,3 +33,16 @@ STARFELT_PROBE_MODEL=1 starfelt run train.py
 ## Why
 
 Workload fingerprints are the passive dataset for later chip decisions — what people actually train, not synthetic benches alone.
+
+## Batch 5 additions
+
+| Field | Meaning |
+|-------|---------|
+| `epoch_history` | Array of per-epoch records: `epoch`, `loss`, `lr`, `duration_s`, `cost_usd`, `gpu_util`, `ts` |
+| `source` | `"trainer_sdk"` when produced by the Trainer; otherwise omitted / CLI |
+| `epochs_completed` | Actual epochs finished (may be < planned on early stop) |
+| `stopped_early` | Boolean |
+| `final_loss` | Last epoch average loss |
+| `checkpoint` | Path to last checkpoint if any |
+
+Per-epoch data is the primary feed for future chip-design decisions: which phases of training burn compute.
