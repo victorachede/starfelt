@@ -32,16 +32,11 @@ def test_config_rejects_unknown_provider(tmp_path: Path, monkeypatch):
     assert "unknown provider" in str(ei.value).lower()
 
 
-def test_callback_patience():
-    cb = StarfeltCallback(patience_steps=3, min_delta=0.01)
-    # disable kill side-effect by setting enabled false via env after? 
-    # step returns True when patience exceeded — but also sends SIGTERM
-    # Use enabled path carefully: set STARFELT_EARLY_STOP=0 for no kill
-    import os
-    os.environ["STARFELT_EARLY_STOP"] = "0"
-    cb2 = StarfeltCallback(patience_steps=2)
-    assert cb2.enabled is False
-    assert cb2.step(1.0) is False
+def test_callback_patience(monkeypatch):
+    monkeypatch.setenv("STARFELT_EARLY_STOP", "0")
+    cb = StarfeltCallback(patience_steps=2)
+    assert cb.enabled is False
+    assert cb.step(1.0) is False
 
 
 def test_interrupted_marker(tmp_path: Path, monkeypatch):
