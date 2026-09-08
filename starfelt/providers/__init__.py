@@ -1,4 +1,4 @@
-"""Compute providers — RunPod, Lambda, AWS, GCP adapters (stubs in Stage 1)."""
+"""Compute providers — Stage 1: stubs only. Orchestration is explicitly deferred."""
 
 from starfelt.providers.base import pick_cheapest, ProviderOffer
 

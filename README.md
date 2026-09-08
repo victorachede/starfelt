@@ -1,67 +1,74 @@
 # Starfelt
 
-**Training efficiency layer.** Point it at your training script — Starfelt makes the run cheaper, faster, and smarter. No infra rewrite. No new framework.
+**Training efficiency layer.** Point it at your PyTorch training script — Starfelt analyzes, monitors, and tracks cost. No infra rewrite.
 
 ```bash
-pip install starfelt
+pip install -e .
 starfelt init
 starfelt run train.py
 ```
 
-> Private · Stage 1 — Training Efficiency Layer
+> Private · Stage 1 — analysis + runtime monitoring · **one user who says “this saved me money”**
 
 ---
 
-## What it does
+## Stage 1 non-negotiables
 
-| Layer | Behavior |
-|-------|----------|
-| **Pre-run analysis** | Flags bad batch size, risky LR, data bottlenecks; estimates cost/time |
-| **Runtime optimization** | Dynamic LR, grad accumulation, early-stop signals, checkpoint cadence |
-| **Data pipeline** | Prefetch/cache, sharding, skip redundant samples |
-| **Cost dashboard** | Live spend, projected total, vs baseline without Starfelt |
-| **Multi-provider** | AWS / GCP / Lambda Labs / RunPod — cheapest fit + spot resume |
+- CLI is zero-friction: `starfelt run train.py` just works  
+- **PyTorch first** — everything else later  
+- Dashboard can be a **terminal UI** to start  
+- Ship **pre-run analysis + runtime monitoring** before cloud orchestration  
 
-## What it is not
+### Explicitly later
 
-- Not a cloud provider  
-- Not a training framework  
-- Works with **PyTorch, JAX, anything** you already run  
+- Multi-provider orchestration (RunPod / AWS / …)  
+- Enterprise tier / SLA packaging  
+- Full web cost console  
 
-## Quick start (local)
+---
+
+## Commands
+
+| Command | |
+|---------|--|
+| `starfelt init` | Write `starfelt.yaml` + `.starfelt/` |
+| `starfelt analyze train.py` | Pre-run checks (batch, LR, data, cost sketch) |
+| `starfelt run train.py` | Wrap process, track cost, emit run id |
+| `starfelt cost` | Terminal cost history |
 
 ```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
-starfelt init
 starfelt analyze examples/train_toy.py
 starfelt run examples/train_toy.py
+starfelt cost
 ```
 
-## Package layout
+---
+
+## Layout
 
 ```
 starfelt/
-  cli/           # starfelt init | analyze | run | cost
-  core/          # analysis, runtime hooks, data pipeline, cost model
-  providers/     # compute backend adapters (stubs → real)
-  dashboard/     # local cost history
+  cli/           # init | analyze | run | cost
+  core/          # analysis, runner, cost, data helpers
+  providers/     # stubs only — not Stage 1 product surface
 examples/
-docs/
+docs/STAGE1.md
 ```
-
-## Business model (indicative)
-
-| Tier | |
-|------|--|
-| Free | 5 runs / month |
-| Pro | $49 / month unlimited |
-| Enterprise | Custom + SLA |
-
-## Passive learning → chip
-
-Every run contributes workload patterns and which optimizations actually move cost — signal for later silicon.
 
 ---
 
-Stage 1 scope is the **wrapper CLI + SDK**. Cloud orchestration and full dashboard ship as the adapters harden.
+## Stack (Stage 1)
+
+| Piece | Choice |
+|-------|--------|
+| CLI / SDK | Python |
+| Dashboard | **Terminal first** (`starfelt cost` + rich tables) |
+| Run history | **Local** `.starfelt/` → optional **Supabase** when you want sync across machines |
+
+Same Supabase org as ASKTC is fine later; don’t block Stage 1 on it.
+
+---
+
+## Goal
+
+One serious training user: *“this saved me money.”* That’s the exit criterion for Stage 1.
