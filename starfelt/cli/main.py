@@ -114,12 +114,19 @@ def run_cmd(
         console.print("[yellow]Dry run[/] — no process started.")
         return
     console.print()
+    lines = [
+        f"Exit code: {result.exit_code}",
+        f"Duration: {result.duration_s:.1f}s",
+        f"Tracked cost: ${result.cost_usd:.4f}",
+    ]
+    if result.gpu_util_avg is not None:
+        lines.append(f"Avg GPU util: {result.gpu_util_avg:.0f}%")
+    if result.interrupted:
+        lines.append("Interrupted: marker written under .starfelt/runs/")
+    lines.append(f"Run id: {result.run_id}")
     console.print(
         Panel(
-            f"Exit code: {result.exit_code}\n"
-            f"Duration: {result.duration_s:.1f}s\n"
-            f"Tracked cost: ${result.cost_usd:.4f}\n"
-            f"Run id: {result.run_id}",
+            "\n".join(lines),
             title="Run complete",
             border_style="green" if result.exit_code == 0 else "red",
         )
@@ -128,7 +135,12 @@ def run_cmd(
 
 @cli.command("cost")
 @click.option("--json", "as_json", is_flag=True)
-def cost_cmd(as_json: bool) -> None:
+@click.option(
+    "--compare",
+    is_flag=True,
+    help="Show baseline (without Starfelt) vs actual and savings",
+)
+def cost_cmd(as_json: bool, compare: bool) -> None:
     """Show local run cost history."""
     history = load_history()
     if as_json:
@@ -141,17 +153,37 @@ def cost_cmd(as_json: bool) -> None:
     table.add_column("Run")
     table.add_column("Script")
     table.add_column("Duration")
-    table.add_column("Cost USD")
+    table.add_column("Cost")
+    if compare:
+        table.add_column("Baseline")
+        table.add_column("Saved")
     for row in history[-20:]:
-        table.add_row(
-            row.get("run_id", "?")[:8],
-            row.get("script", ""),
+        cost = float(row.get("cost_usd", 0) or 0)
+        baseline = float(row.get("baseline_cost_usd") or cost * 1.35)
+        saved = float(row.get("saved_usd") if row.get("saved_usd") is not None else baseline - cost)
+        cells = [
+            str(row.get("run_id", "?"))[:8],
+            str(row.get("script", "")),
             f"{row.get('duration_s', 0):.1f}s",
-            f"${row.get('cost_usd', 0):.4f}",
-        )
+            f"${cost:.4f}",
+        ]
+        if compare:
+            cells.extend([f"${baseline:.4f}", f"${saved:.4f}"])
+        table.add_row(*cells)
     console.print(table)
-    total = sum(r.get("cost_usd", 0) for r in history)
-    console.print(f"Total tracked: [bold]${total:.4f}[/]")
+    total = sum(float(r.get("cost_usd", 0) or 0) for r in history)
+    if compare:
+        total_base = sum(
+            float(r.get("baseline_cost_usd") or float(r.get("cost_usd", 0) or 0) * 1.35)
+            for r in history
+        )
+        console.print(
+            f"Total tracked: [bold]${total:.4f}[/]  ·  "
+            f"Baseline: [bold]${total_base:.4f}[/]  ·  "
+            f"Saved: [bold green]${total_base - total:.4f}[/]"
+        )
+    else:
+        console.print(f"Total tracked: [bold]${total:.4f}[/]")
 
 
 def _status_renderable():
@@ -222,6 +254,29 @@ def status_cmd(watch: bool) -> None:
                 live.update(_status_renderable())
     except KeyboardInterrupt:
         console.print("\n[dim]Stopped watching[/]")
+
+
+
+@cli.group("providers")
+def providers_group() -> None:
+    """Compute price catalog (estimates)."""
+
+
+@providers_group.command("list")
+def providers_list() -> None:
+    """Show static GPU catalog + price disclaimer."""
+    from starfelt.providers.base import CATALOG, CATALOG_WARNING, PRICES_LAST_UPDATED
+
+    console.print(f"[yellow]{CATALOG_WARNING}[/]")
+    console.print(f"[dim]PRICES_LAST_UPDATED = {PRICES_LAST_UPDATED}[/]")
+    table = Table(title="Providers (estimates)", header_style="bold")
+    table.add_column("Provider")
+    table.add_column("GPU")
+    table.add_column("$/hr")
+    table.add_column("Spot")
+    for o in CATALOG:
+        table.add_row(o.name, o.gpu, f"{o.usd_per_hour:.2f}", "yes" if o.spot else "no")
+    console.print(table)
 
 
 if __name__ == "__main__":

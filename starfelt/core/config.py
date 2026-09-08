@@ -7,6 +7,8 @@ from typing import Any
 
 import yaml
 
+KNOWN_PROVIDERS = {"runpod", "lambda", "aws", "gcp"}
+
 DEFAULT_CONFIG = """# Starfelt project config
 project: my-training
 budget_usd_per_run: 50
@@ -44,6 +46,26 @@ class StarfeltConfig:
     allow_spot: bool = True
     raw: dict[str, Any] = field(default_factory=dict)
 
+    def validate(self) -> None:
+        errors: list[str] = []
+        if self.budget_usd_per_run < 0:
+            errors.append(f"budget_usd_per_run must be >= 0 (got {self.budget_usd_per_run})")
+        if self.gpu_hour_usd <= 0:
+            errors.append(f"cost.gpu_hour_usd must be > 0 (got {self.gpu_hour_usd})")
+        if self.baseline_multiplier < 1.0:
+            errors.append(
+                f"cost.baseline_multiplier should be >= 1.0 (got {self.baseline_multiplier})"
+            )
+        if self.patience_steps < 1:
+            errors.append(f"early_stop.patience_steps must be >= 1")
+        for p in self.preferred_providers:
+            if p not in KNOWN_PROVIDERS:
+                errors.append(
+                    f"unknown provider '{p}' (known: {', '.join(sorted(KNOWN_PROVIDERS))})"
+                )
+        if errors:
+            raise click_error("Invalid starfelt config:\n  - " + "\n  - ".join(errors))
+
 
 def click_error(msg: str) -> Exception:
     import click
@@ -62,7 +84,6 @@ def init_project(cwd: Path, force: bool = False) -> Path:
 
 
 def validate_environment() -> list[tuple[str, str, str]]:
-    """Return list of (check, status ok|fail, detail)."""
     rows: list[tuple[str, str, str]] = []
     major, minor = sys.version_info[:2]
     py_ok = (major, minor) >= (3, 10)
@@ -118,11 +139,17 @@ def load_config(path: Path | None = None) -> StarfeltConfig:
     early = data.get("early_stop") or {}
     ckpt = data.get("checkpoint") or {}
     providers = data.get("providers") or {}
-    return StarfeltConfig(
+
+    def _f(d, key, default):
+        if key not in d or d[key] is None:
+            return float(default)
+        return float(d[key])
+
+    cfg = StarfeltConfig(
         project=str(data.get("project") or "my-training"),
-        budget_usd_per_run=float(data.get("budget_usd_per_run") or 50),
-        gpu_hour_usd=float(cost.get("gpu_hour_usd") or 1.20),
-        baseline_multiplier=float(cost.get("baseline_multiplier") or 1.35),
+        budget_usd_per_run=_f(data, "budget_usd_per_run", 50),
+        gpu_hour_usd=_f(cost, "gpu_hour_usd", 1.20),
+        baseline_multiplier=_f(cost, "baseline_multiplier", 1.35),
         early_stop_enabled=bool(early.get("enabled", True)),
         patience_steps=int(early.get("patience_steps") or 500),
         checkpoint_every_steps=int(ckpt.get("every_steps") or 200),
@@ -132,3 +159,5 @@ def load_config(path: Path | None = None) -> StarfeltConfig:
         allow_spot=bool(providers.get("allow_spot", True)),
         raw=data,
     )
+    cfg.validate()
+    return cfg

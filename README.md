@@ -47,6 +47,8 @@ starfelt status --watch
 | `starfelt status` | Active run + last 5 + total spend |
 | `starfelt status --watch` | Live refresh every second |
 | `starfelt cost` | Full local cost history |
+| `starfelt cost --compare` | Actual vs baseline + savings |
+| `starfelt providers list` | Static GPU price catalog |
 
 ---
 
@@ -56,6 +58,9 @@ starfelt status --watch
 - **Live** `run`: streamed stdout, cost ticker, fail confirmation
 - **Terminal** cost/status (no web dashboard yet)
 - Local history under `.starfelt/`
+- Optional GPU util via `nvidia-smi`
+- `StarfeltCallback` for early-stop in PyTorch loops
+- Interrupt markers on SIGINT/SIGTERM
 
 ## What Stage 1 is not
 

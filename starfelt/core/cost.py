@@ -25,26 +25,31 @@ class CostTracker:
         self.script = script
         self.run_id = uuid.uuid4().hex
         self.t0 = time.time()
+        self.extras: dict[str, Any] = {}
 
-    def finish(self, exit_code: int) -> dict[str, Any]:
+    def finish(self, exit_code: int, **extra: Any) -> dict[str, Any]:
         duration_s = time.time() - self.t0
         hours = duration_s / 3600.0
         cost = hours * self.cfg.gpu_hour_usd
-        row = {
+        baseline = cost * self.cfg.baseline_multiplier
+        row: dict[str, Any] = {
             "run_id": self.run_id,
             "script": self.script,
             "duration_s": duration_s,
             "cost_usd": cost,
-            "baseline_cost_usd": cost * self.cfg.baseline_multiplier,
+            "baseline_cost_usd": baseline,
+            "saved_usd": baseline - cost,
             "exit_code": exit_code,
             "ts": time.time(),
         }
+        row.update(self.extras)
+        row.update(extra)
         path = _history_path()
         hist = load_history()
         hist.append(row)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(hist, indent=2), encoding="utf-8")
-        ( _runs_dir() / f"{self.run_id}.json").write_text(
+        (_runs_dir() / f"{self.run_id}.json").write_text(
             json.dumps(row, indent=2), encoding="utf-8"
         )
         return row
@@ -84,3 +89,29 @@ def read_active_run() -> dict[str, Any] | None:
         return json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         return None
+
+
+def write_interrupted_marker(
+    run_id: str,
+    *,
+    script: str,
+    elapsed_s: float,
+    cost_usd: float,
+    signal_name: str,
+) -> Path:
+    path = _runs_dir() / f"{run_id}_interrupted.json"
+    path.write_text(
+        json.dumps(
+            {
+                "run_id": run_id,
+                "script": script,
+                "elapsed_s": elapsed_s,
+                "cost_usd": cost_usd,
+                "signal": signal_name,
+                "ts": time.time(),
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return path
