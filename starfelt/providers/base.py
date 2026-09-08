@@ -1,6 +1,15 @@
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
+
+# Static sketch prices until live APIs are wired — verify before spending.
+PRICES_LAST_UPDATED = "2026-09-08"
+
+CATALOG_WARNING = (
+    f"Prices are estimates (last updated {PRICES_LAST_UPDATED}) — "
+    "verify before committing spend."
+)
 
 
 @dataclass
@@ -11,7 +20,6 @@ class ProviderOffer:
     spot: bool = False
 
 
-# Static sketch prices until live APIs are wired
 CATALOG = [
     ProviderOffer("runpod", "A100-40G", 1.09, spot=True),
     ProviderOffer("lambda", "A100-40G", 1.25, spot=False),
@@ -24,6 +32,7 @@ def pick_cheapest(
     preferred: list[str] | None = None,
     allow_spot: bool = True,
 ) -> ProviderOffer:
+    warnings.warn(CATALOG_WARNING, UserWarning, stacklevel=2)
     offers = [o for o in CATALOG if allow_spot or not o.spot]
     if preferred:
         ranked = [o for p in preferred for o in offers if o.name == p]

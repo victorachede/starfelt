@@ -1,10 +1,15 @@
-"""Data pipeline helpers — prefetch, shard, skip redundant samples.
+"""Data pipeline helpers.
 
-Stage 1 ships interfaces + light utilities. Deep framework hooks follow.
+TODO (Stage 2):
+- Real async prefetch with background thread/process
+- Automatic dataset sharding integrated with DistributedSampler
+- Content-hash redundant sample skipping for common dataset types
+- PyTorch DataLoader monkey-patch / wrapper that applies hints by default
 """
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from typing import Iterable, Iterator, TypeVar
 
@@ -37,6 +42,12 @@ def dedupe_keep_order(items: Iterable[T]) -> list[T]:
     return out
 
 
-def prefetch_stub(it: Iterator[T], buffer_size: int = 8) -> Iterator[T]:
-    """Placeholder for async prefetch; yields from iterator as-is in Stage 1."""
+def prefetch(it: Iterator[T], buffer_size: int = 8) -> Iterator[T]:
+    """Passthrough until Stage 2 implements real prefetch."""
+    warnings.warn(
+        "prefetch not yet implemented — using passthrough",
+        UserWarning,
+        stacklevel=2,
+    )
+    _ = buffer_size
     yield from it

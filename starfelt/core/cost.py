@@ -58,3 +58,29 @@ def load_history() -> list[dict[str, Any]]:
         return json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         return []
+
+
+def _active_path() -> Path:
+    return Path.cwd() / ".starfelt" / "active.json"
+
+
+def write_active_run(row: dict[str, Any]) -> None:
+    path = _active_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(row, indent=2), encoding="utf-8")
+
+
+def clear_active_run() -> None:
+    path = _active_path()
+    if path.exists():
+        path.unlink()
+
+
+def read_active_run() -> dict[str, Any] | None:
+    path = _active_path()
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
