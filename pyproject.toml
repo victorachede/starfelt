@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "starfelt"
+version = "0.1.0"
+description = "Training efficiency layer — wrap any training script, cut cost and waste"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Proprietary" }
+authors = [{ name = "Victor Achede" }]
+dependencies = [
+  "click>=8.1",
+  "rich>=13.0",
+  "pyyaml>=6.0",
+  "psutil>=5.9",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.4", "ruff>=0.4"]
+
+[project.scripts]
+starfelt = "starfelt.cli.main:cli"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["starfelt*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
