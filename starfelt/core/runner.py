@@ -22,6 +22,8 @@ from starfelt.core.cost import (
     write_interrupted_marker,
 )
 from starfelt.core.gpu import GpuMonitor
+from starfelt.core.model_size import estimate_model_params
+from starfelt.core.telemetry import build_run_telemetry
 
 console = Console(stderr=True)
 _STDOUT_DONE = object()
@@ -38,6 +40,8 @@ class RunResult:
     aborted: bool = False
     gpu_util_avg: float | None = None
     interrupted: bool = False
+    workload_id: str | None = None
+    framework: str | None = None
 
 
 def _format_elapsed(seconds: float) -> str:
@@ -265,12 +269,28 @@ def run_wrapped(
     console.print("\r" + " " * 56 + "\r", end="")
     exit_code = proc.returncode if proc.returncode is not None else 1
     avg = gpu.average_util()
-    row = tracker.finish(
-        exit_code,
+    model_params = estimate_model_params(script)
+    telem = build_run_telemetry(
+        run_id=tracker.run_id,
+        script=str(script),
+        duration_s=time.time() - tracker.t0,
+        cost_usd=0.0,  # filled by tracker
+        baseline_cost_usd=0.0,
+        exit_code=exit_code,
+        hints=report.telemetry,
+        model_param_count=model_params,
+        gpu_name=(gpu.last.name if gpu.last else None),
         gpu_util_avg=avg,
         gpu_samples=len(gpu.samples),
-        gpu_name=(gpu.last.name if gpu.last else None),
         interrupted=interrupted["sig"],
+    )
+    # tracker computes cost/duration; merge telemetry fields
+    row = tracker.finish(
+        exit_code,
+        **{k: v for k, v in telem.items() if k not in {
+            "run_id", "script", "duration_s", "cost_usd",
+            "baseline_cost_usd", "saved_usd", "exit_code", "ts",
+        }},
     )
 
     if exit_code != 0:
@@ -284,4 +304,6 @@ def run_wrapped(
         checks=report.checks,
         gpu_util_avg=avg,
         interrupted=interrupted["sig"] is not None,
+        workload_id=row.get("workload_id"),
+        framework=row.get("framework"),
     )
