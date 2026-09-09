@@ -14,6 +14,7 @@ from rich.table import Table
 
 from starfelt import __version__
 from starfelt.core.analyze import analyze_script
+from starfelt.core.benchmark import BenchmarkConfig, run_mlp_benchmark
 from starfelt.core.config import init_project, load_config, validate_environment
 from starfelt.core.cost import load_history, read_active_run
 from starfelt.core.runner import run_wrapped
@@ -566,74 +567,62 @@ def resume_cmd(run_id: str, script_path: str | None, force: bool) -> None:
 
 @cli.command("benchmark")
 @click.option("--steps", default=50, show_default=True, help="Mini training steps")
+@click.option("--warmup", default=5, show_default=True, help="Unmeasured warmup steps")
+@click.option("--repeats", default=3, show_default=True, help="Measured repetitions")
 @click.option("--batch-size", default=32, show_default=True)
-def benchmark_cmd(steps: int, batch_size: int) -> None:
-    """Run a standardized mini job and report effective throughput vs catalog."""
+@click.option(
+    "--device",
+    type=click.Choice(["auto", "cpu", "cuda"]),
+    default="auto",
+    show_default=True,
+)
+@click.option("--seed", default=0, show_default=True)
+@click.option("--json-out", type=click.Path(dir_okay=False), default=None)
+def benchmark_cmd(
+    steps: int,
+    warmup: int,
+    repeats: int,
+    batch_size: int,
+    device: str,
+    seed: int,
+    json_out: str | None,
+) -> None:
+    """Run repeatable throughput, cost, power, and energy measurements."""
     try:
-        import torch
-        import torch.nn as nn
-    except ImportError:
-        console.print("[red]PyTorch required for benchmark[/]")
+        report = run_mlp_benchmark(
+            BenchmarkConfig(
+                steps=steps,
+                warmup_steps=warmup,
+                repeats=repeats,
+                batch_size=batch_size,
+                device=device,
+                seed=seed,
+            )
+        )
+    except (ImportError, RuntimeError, ValueError) as exc:
+        console.print(f"[red]{exc}[/]")
         raise SystemExit(1)
-
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = nn.Sequential(
-        nn.Linear(512, 512),
-        nn.ReLU(),
-        nn.Linear(512, 512),
-        nn.ReLU(),
-        nn.Linear(512, 10),
-    ).to(device)
-    opt = torch.optim.Adam(model.parameters(), lr=1e-3)
-    x = torch.randn(batch_size, 512, device=device)
-    y = torch.randint(0, 10, (batch_size,), device=device)
-    loss_fn = nn.CrossEntropyLoss()
-
-    for _ in range(5):
-        opt.zero_grad(set_to_none=True)
-        loss = loss_fn(model(x), y)
-        loss.backward()
-        opt.step()
-    if device == "cuda":
-        torch.cuda.synchronize()
-
-    t0 = time.time()
-    for _ in range(steps):
-        opt.zero_grad(set_to_none=True)
-        loss = loss_fn(model(x), y)
-        loss.backward()
-        opt.step()
-    if device == "cuda":
-        torch.cuda.synchronize()
-    elapsed = time.time() - t0
-
-    steps_per_s = steps / elapsed
-    samples_per_s = steps_per_s * batch_size
 
     from starfelt.providers.base import CATALOG_WARNING
 
-    cfg = load_config()
+    summary = report.to_dict()["summary"]
     console.print(
         Panel(
-            f"Device: [bold]{device}[/]\n"
-            f"Steps: {steps} · batch={batch_size}\n"
-            f"Elapsed: {elapsed:.2f}s\n"
-            f"Throughput: [bold]{steps_per_s:.1f}[/] steps/s  ·  "
-            f"[bold]{samples_per_s:.0f}[/] samples/s\n"
-            f"Configured gpu_hour_usd: ${cfg.gpu_hour_usd:.2f}",
+            f"Workload: [bold]synthetic_mlp_v1[/]\n"
+            f"Device: [bold]{report.results[0].device}[/] · repeats={repeats}\n"
+            f"Median elapsed: {summary['median_elapsed_s']:.2f}s\n"
+            f"Median throughput: [bold]{summary['median_steps_per_s']:.1f}[/] steps/s  ·  "
+            f"[bold]{summary['median_samples_per_s']:.0f}[/] samples/s\n"
+            f"Median cost: ${summary['median_cost_usd']:.6f}\n"
+            f"Median energy: {summary['median_energy_j'] or 'n/a'} J",
             title="starfelt benchmark",
             border_style="cyan",
         )
     )
     console.print(f"[dim]{CATALOG_WARNING}[/]")
-    if device == "cuda":
-        suggested = max(0.4, min(3.5, 1.2 * (250 / max(samples_per_s, 1))))
-        console.print(
-            f"Suggested [cyan]cost.gpu_hour_usd[/] for this machine ≈ "
-            f"[bold]${suggested:.2f}[/] (heuristic — measure real provider bills)"
-        )
-    else:
-        console.print("[yellow]CPU-only — set gpu_hour_usd to your actual instance rate[/]")
+    if json_out:
+        report.write_json(Path(json_out))
+        console.print(f"[green]Wrote JSON benchmark report → {json_out}[/]")
 
 
 @cli.command("config")

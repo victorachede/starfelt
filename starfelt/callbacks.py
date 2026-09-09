@@ -11,13 +11,12 @@ Usage (optional one-liner in your loop)::
 from __future__ import annotations
 
 import os
-import signal
 from dataclasses import dataclass, field
 
 
 @dataclass
 class StarfeltCallback:
-    """Monitor loss plateau; SIGTERM self when patience exceeded.
+    """Monitor loss plateau and request a graceful stop when patience is exceeded.
 
     Respects ``STARFELT_EARLY_STOP`` (default on if unset or \"1\").
     Patience from ``STARFELT_PATIENCE_STEPS`` or constructor.
@@ -58,9 +57,5 @@ class StarfeltCallback:
         patience = self.patience_steps or 500
         if self._stale >= patience:
             self.stopped = True
-            try:
-                os.kill(os.getpid(), signal.SIGTERM)
-            except OSError:
-                pass
             return True
         return False

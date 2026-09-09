@@ -23,7 +23,7 @@ Example::
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from typing import Callable
 
 _EPOCH_END: list[Callable[[int, float, float], None]] = []
 _CHECKPOINT: list[Callable[[str], None]] = []

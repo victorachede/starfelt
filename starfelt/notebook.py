@@ -20,7 +20,6 @@ import os
 import time
 from typing import Any
 
-
 # ---------------------------------------------------------------------------
 # Environment detection
 # ---------------------------------------------------------------------------
@@ -116,7 +115,7 @@ class StarfeltDisplay:
             return
 
         try:
-            from IPython.display import clear_output, display, HTML  # type: ignore[import]
+            from IPython.display import HTML, clear_output, display  # type: ignore[import]
         except ImportError:
             return
 

@@ -31,7 +31,7 @@ import json
 import os
 import time
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -404,11 +404,24 @@ class Trainer:
         if self.device.type == "cuda":
             self.torch.cuda.reset_peak_memory_stats()
 
+        try:
+            loader_len = len(self.train_loader)  # type: ignore[arg-type]
+        except TypeError:
+            loader_len = None
+
         for batch_idx, batch in enumerate(self.train_loader):
             if self.max_steps is not None and self._step >= self.max_steps:
                 break
 
-            loss_val, batch_size = self._train_step(batch, batch_idx)
+            is_last_batch = loader_len is not None and batch_idx + 1 == loader_len
+            reaches_max_steps = (
+                self.max_steps is not None and self._step + 1 >= self.max_steps
+            )
+            loss_val, batch_size = self._train_step(
+                batch,
+                batch_idx,
+                force_step=is_last_batch or reaches_max_steps,
+            )
             running_loss += loss_val
             n_batches += 1
             n_samples += batch_size
@@ -463,7 +476,13 @@ class Trainer:
             "peak_mem_mb": peak_mem,
         }
 
-    def _train_step(self, batch: Any, batch_idx: int) -> tuple[float, int]:
+    def _train_step(
+        self,
+        batch: Any,
+        batch_idx: int,
+        *,
+        force_step: bool = False,
+    ) -> tuple[float, int]:
         x, y, batch_size = self._unpack_batch(batch)
         x = self._to_device(x)
         if y is not None:
@@ -473,14 +492,14 @@ class Trainer:
             with self.torch.cuda.amp.autocast():
                 loss = self._compute_loss(x, y) / self.grad_accum_steps
             self._scaler.scale(loss).backward()
-            if (batch_idx + 1) % self.grad_accum_steps == 0:
+            if force_step or (batch_idx + 1) % self.grad_accum_steps == 0:
                 self._scaler.step(self.optimizer)
                 self._scaler.update()
                 self.optimizer.zero_grad(set_to_none=True)
         else:
             loss = self._compute_loss(x, y) / self.grad_accum_steps
             loss.backward()
-            if (batch_idx + 1) % self.grad_accum_steps == 0:
+            if force_step or (batch_idx + 1) % self.grad_accum_steps == 0:
                 self.optimizer.step()
                 self.optimizer.zero_grad(set_to_none=True)
 
@@ -513,7 +532,9 @@ class Trainer:
             x, y = batch[0], batch[1]
         elif isinstance(batch, dict):
             # HF-style batch
-            y = batch.get("labels") or batch.get("label")
+            y = batch.get("labels")
+            if y is None:
+                y = batch.get("label")
             x = {k: v for k, v in batch.items() if k not in ("labels", "label")}
             if len(x) == 1:
                 x = next(iter(x.values()))
@@ -686,6 +707,8 @@ class Trainer:
             gpu_name=(self.gpu.last.name if self.gpu.last else None),
             gpu_util_avg=self.gpu.average_util(),
             gpu_samples=len(self.gpu.samples),
+            gpu_power_avg_w=self.gpu.average_power_w(),
+            gpu_energy_j=self.gpu.energy_j if self.gpu.power_samples else None,
             interrupted=None,
             extra={
                 "ts": time.time(),
