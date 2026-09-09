@@ -50,7 +50,6 @@ def test_build_telemetry_schema_fields():
         script="t.py",
         duration_s=1.0,
         cost_usd=0.1,
-        baseline_cost_usd=0.15,
         exit_code=0,
         hints=TelemetryHints(framework="pytorch", batch_size=32, epochs=5),
         model_param_count=2_000_000,

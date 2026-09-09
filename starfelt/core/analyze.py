@@ -235,7 +235,7 @@ def analyze_script(script: Path, cfg: StarfeltConfig) -> AnalysisReport:
             checks=checks,
             est_hours=0.1,
             est_cost_usd=0.1 * cfg.gpu_hour_usd,
-            est_cost_optimized_usd=0.1 * cfg.gpu_hour_usd / cfg.baseline_multiplier,
+            est_cost_optimized_usd=0.1 * cfg.gpu_hour_usd * 0.74,
             telemetry=TelemetryHints(),
         )
 
@@ -373,7 +373,8 @@ def analyze_script(script: Path, cfg: StarfeltConfig) -> AnalysisReport:
     ep = epochs or 10
     est_hours = max(0.1, ep * 0.15 * (1.0 if (batch or 32) >= 16 else 1.4))
     est_cost = est_hours * cfg.gpu_hour_usd
-    est_opt = est_cost / cfg.baseline_multiplier
+    # Heuristic sketch only — real savings come from starfelt compare run_a run_b
+    est_opt = est_cost * 0.74
 
     checks.append(
         Check(

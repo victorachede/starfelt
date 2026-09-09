@@ -27,7 +27,6 @@ providers:
 cost:
   # rough $/GPU-hour defaults for local estimates
   gpu_hour_usd: 1.20
-  baseline_multiplier: 1.35  # assumed waste without Starfelt
 """
 
 
@@ -36,7 +35,6 @@ class StarfeltConfig:
     project: str = "my-training"
     budget_usd_per_run: float = 50.0
     gpu_hour_usd: float = 1.20
-    baseline_multiplier: float = 1.35
     early_stop_enabled: bool = True
     patience_steps: int = 500
     checkpoint_every_steps: int = 200
@@ -52,10 +50,6 @@ class StarfeltConfig:
             errors.append(f"budget_usd_per_run must be >= 0 (got {self.budget_usd_per_run})")
         if self.gpu_hour_usd <= 0:
             errors.append(f"cost.gpu_hour_usd must be > 0 (got {self.gpu_hour_usd})")
-        if self.baseline_multiplier < 1.0:
-            errors.append(
-                f"cost.baseline_multiplier should be >= 1.0 (got {self.baseline_multiplier})"
-            )
         if self.patience_steps < 1:
             errors.append("early_stop.patience_steps must be >= 1")
         for p in self.preferred_providers:
@@ -149,7 +143,6 @@ def load_config(path: Path | None = None) -> StarfeltConfig:
         project=str(data.get("project") or "my-training"),
         budget_usd_per_run=_f(data, "budget_usd_per_run", 50),
         gpu_hour_usd=_f(cost, "gpu_hour_usd", 1.20),
-        baseline_multiplier=_f(cost, "baseline_multiplier", 1.35),
         early_stop_enabled=bool(early.get("enabled", True)),
         patience_steps=int(early.get("patience_steps") or 500),
         checkpoint_every_steps=int(ckpt.get("every_steps") or 200),

@@ -44,14 +44,12 @@ class CostTracker:
         duration_s = time.time() - self.t0
         hours = duration_s / 3600.0
         cost = hours * self.cfg.gpu_hour_usd
-        baseline = cost * self.cfg.baseline_multiplier
 
         row = build_run_telemetry(
             run_id=self.run_id,
             script=self.script,
             duration_s=duration_s,
             cost_usd=cost,
-            baseline_cost_usd=baseline,
             exit_code=exit_code,
             hints=hints,
             model_param_count=model_param_count,

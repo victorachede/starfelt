@@ -139,13 +139,11 @@ def run_cmd(
 
 @cli.command("cost")
 @click.option("--json", "as_json", is_flag=True)
-@click.option(
-    "--compare",
-    is_flag=True,
-    help="Show baseline (without Starfelt) vs actual and savings",
-)
-def cost_cmd(as_json: bool, compare: bool) -> None:
-    """Show local run cost history."""
+def cost_cmd(as_json: bool) -> None:
+    """Show local run cost history.
+
+    For real savings between two runs, use: starfelt compare run_a run_b
+    """
     history = load_history()
     if as_json:
         click.echo(json.dumps(history, indent=2))
@@ -158,36 +156,18 @@ def cost_cmd(as_json: bool, compare: bool) -> None:
     table.add_column("Script")
     table.add_column("Duration")
     table.add_column("Cost")
-    if compare:
-        table.add_column("Baseline")
-        table.add_column("Saved")
     for row in history[-20:]:
         cost = float(row.get("cost_usd", 0) or 0)
-        baseline = float(row.get("baseline_cost_usd") or cost * 1.35)
-        saved = float(row.get("saved_usd") if row.get("saved_usd") is not None else baseline - cost)
-        cells = [
+        table.add_row(
             str(row.get("run_id", "?"))[:8],
             str(row.get("script", "")),
             f"{row.get('duration_s', 0):.1f}s",
             f"${cost:.4f}",
-        ]
-        if compare:
-            cells.extend([f"${baseline:.4f}", f"${saved:.4f}"])
-        table.add_row(*cells)
+        )
     console.print(table)
     total = sum(float(r.get("cost_usd", 0) or 0) for r in history)
-    if compare:
-        total_base = sum(
-            float(r.get("baseline_cost_usd") or float(r.get("cost_usd", 0) or 0) * 1.35)
-            for r in history
-        )
-        console.print(
-            f"Total tracked: [bold]${total:.4f}[/]  ·  "
-            f"Baseline: [bold]${total_base:.4f}[/]  ·  "
-            f"Saved: [bold green]${total_base - total:.4f}[/]"
-        )
-    else:
-        console.print(f"Total tracked: [bold]${total:.4f}[/]")
+    console.print(f"Total tracked: [bold]${total:.4f}[/]")
+    console.print("[dim]Compare two runs: [cyan]starfelt compare run_a run_b[/][/]")
 
 
 def _status_renderable():
@@ -391,8 +371,6 @@ def inspect_cmd(run_id: str, as_json: bool) -> None:
     table.add_row("Framework", str(row.get("framework", "—")))
     table.add_row("Duration", f"{row.get('duration_s', 0):.1f}s")
     table.add_row("Cost", f"${float(row.get('cost_usd') or 0):.4f}")
-    table.add_row("Baseline", f"${float(row.get('baseline_cost_usd') or 0):.4f}")
-    table.add_row("Saved", f"${float(row.get('saved_usd') or 0):.4f}")
     table.add_row("Exit", str(row.get("exit_code", "—")))
     table.add_row("Workload", str(row.get("workload_id", "—")))
     if row.get("interrupted"):
@@ -489,7 +467,6 @@ def compare_cmd(run_id_1: str, run_id_2: str) -> None:
         ("Cost ($)", "cost_usd", True),
         ("Duration (s)", "duration_s", True),
         ("GPU util %", "gpu_util_avg", False),
-        ("Saved ($)", "saved_usd", False),
         ("Exit code", "exit_code", True),
     ]
     for label, key, lower_better in metrics:

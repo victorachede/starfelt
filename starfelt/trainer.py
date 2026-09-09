@@ -520,7 +520,6 @@ class Trainer:
         duration_s = time.time() - self._t0
         hours = duration_s / 3600.0
         cost = hours * self.cfg.gpu_hour_usd
-        baseline = cost * self.cfg.baseline_multiplier
         final_loss = self.epoch_history[-1].loss if self.epoch_history else None
         final_val = self.epoch_history[-1].val_loss if self.epoch_history else None
 
@@ -564,7 +563,6 @@ class Trainer:
             script="starfelt.Trainer",
             duration_s=duration_s,
             cost_usd=cost,
-            baseline_cost_usd=baseline,
             exit_code=0,
             hints=hints,
             model_param_count=param_count,

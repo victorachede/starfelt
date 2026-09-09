@@ -9,7 +9,7 @@ Every finished run writes a JSON object under `.starfelt/runs/{run_id}.json` and
 | `schema_version` | Telemetry schema version |
 | `run_id` | Unique run id |
 | `script` | Path to training script |
-| `duration_s` / `cost_usd` / `baseline_cost_usd` / `saved_usd` | Cost model |
+| `duration_s` / `cost_usd` | Duration and tracked cost (real savings via `starfelt compare`) |
 | `exit_code` | Process exit |
 | `framework` | Primary: pytorch / jax / tensorflow / keras / unknown |
 | `frameworks_detected` | All detected |
