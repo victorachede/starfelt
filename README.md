@@ -1,5 +1,7 @@
 # Starfelt
 
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/victorachede/starfelt/blob/main/examples/colab_quickstart.ipynb)
+
 **Stop burning GPU hours you don’t need.**
 
 Starfelt is a training efficiency layer. Point it at any script — or drop in the one-line Trainer SDK — and it analyzes, monitors, checkpoints, tracks cost, and surfaces the data that actually cuts waste.
@@ -150,7 +152,9 @@ starfelt/
   cli/          # init | analyze | run | status | cost | inspect | compare | …
   core/         # analysis, runner, cost, config, telemetry, gpu
   trainer.py    # Trainer SDK
-  callbacks.py  # StarfeltCallback
+  callbacks.py  # Starfelt
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/victorachede/starfelt/blob/main/examples/colab_quickstart.ipynb)Callback
   hooks.py      # plugin surface
   providers/    # static price catalog
 examples/

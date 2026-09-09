@@ -41,6 +41,7 @@ from starfelt.core.cost import _runs_dir, load_history
 from starfelt.core.gpu import GpuMonitor
 from starfelt.core.telemetry import TelemetryHints, build_run_telemetry, size_bucket, workload_id
 from starfelt.hooks import fire_checkpoint, fire_epoch_end
+from starfelt.notebook import StarfeltDisplay, drive_mounted, in_colab
 
 
 def _try_torch():
@@ -50,6 +51,28 @@ def _try_torch():
         return torch
     except ImportError:
         return None
+
+
+def _colab_checkpoint_dir(run_id: str) -> Path | None:
+    """Return a Drive-backed checkpoint dir if in Colab and Drive is mounted."""
+    drive_root = Path("/content/drive/MyDrive/.starfelt/checkpoints")
+    if in_colab() and drive_mounted("/content/drive/MyDrive"):
+        drive_root.mkdir(parents=True, exist_ok=True)
+        return drive_root / run_id
+    return None
+
+
+def _warn_colab_no_drive() -> None:
+    """Warn once if in Colab but Drive isn't mounted."""
+    if in_colab() and not drive_mounted("/content/drive/MyDrive"):
+        print(
+            "\n[starfelt] ⚠️  Google Drive not mounted.\n"
+            "   Checkpoints will be lost if Colab disconnects.\n"
+            "   Mount Drive with:\n"
+            "       from starfelt.notebook import mount_drive\n"
+            "       mount_drive()\n",
+            flush=True,
+        )
 
 
 @dataclass
@@ -125,6 +148,10 @@ class Trainer:
         eval_every_epochs: int = 1,
         data_parallel: bool = False,
         on_epoch_end: Callable[[int, float, float], None] | None = None,
+        notebook_display: StarfeltDisplay | None = None,
+        wandb: bool = False,
+        wandb_project: str | None = None,
+        wandb_run_name: str | None = None,
     ) -> None:
         self.torch = _try_torch()
         if self.torch is None:
@@ -186,6 +213,24 @@ class Trainer:
         if self.amp and self.device.type == "cuda":
             self._scaler = self.torch.cuda.amp.GradScaler()
 
+        # Notebook / Colab setup
+        self._display = notebook_display
+        self._use_wandb = wandb
+        self._wandb_project = wandb_project or self.cfg.project
+        self._wandb_run = None
+        _warn_colab_no_drive()
+
+        # Override checkpoint_dir to Drive if in Colab and Drive is mounted
+        if checkpoint_dir is None:
+            colab_dir = _colab_checkpoint_dir(self.run_id)
+            if colab_dir is not None:
+                self.checkpoint_dir = colab_dir
+                self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+                print(f"[starfelt] Checkpointing to Drive: {self.checkpoint_dir}", flush=True)
+
+        if self._use_wandb:
+            self._init_wandb(wandb_run_name)
+
         resume_path = os.environ.get("STARFELT_RESUME_FROM")
         if resume_path and Path(resume_path).exists():
             self._load_checkpoint(Path(resume_path))
@@ -233,6 +278,14 @@ class Trainer:
                 except Exception:
                     pass
             fire_epoch_end(epoch, train_stats["loss"], cost_so_far)
+            self._log_epoch(
+                epoch, train_stats["loss"],
+                val_loss=val_loss,
+                cost_so_far=cost_so_far,
+                lr=train_stats["lr"],
+                gpu_util=train_stats["gpu_util"],
+                samples_per_sec=train_stats["samples_per_sec"],
+            )
 
             if (epoch + 1) % self.checkpoint_every_epochs == 0:
                 path = self._save_checkpoint(epoch, train_stats["loss"])
@@ -263,6 +316,65 @@ class Trainer:
             epoch += 1
 
         return self._finalize(epochs_completed=len(self.epoch_history))
+
+    def _init_wandb(self, run_name: str | None) -> None:
+        try:
+            import wandb as _wandb  # type: ignore[import]
+            self._wandb_run = _wandb.init(
+                project=self._wandb_project,
+                name=run_name or self.run_id[:8],
+                config={
+                    "run_id": self.run_id,
+                    "gpu_hour_usd": self.cfg.gpu_hour_usd,
+                    "amp": self.amp,
+                    "grad_accum_steps": self.grad_accum_steps,
+                },
+                reinit=True,
+            )
+            print(f"[starfelt] wandb run: {self._wandb_run.url}", flush=True)
+        except ImportError:
+            print("[starfelt] wandb not installed — skipping. pip install wandb", flush=True)
+            self._use_wandb = False
+
+    def _log_epoch(
+        self,
+        epoch: int,
+        loss: float,
+        *,
+        val_loss: float | None = None,
+        cost_so_far: float = 0.0,
+        lr: float | None = None,
+        gpu_util: float | None = None,
+        samples_per_sec: float | None = None,
+    ) -> None:
+        if self._display is not None:
+            self._display.update(
+                epoch, loss,
+                val_loss=val_loss,
+                lr=lr,
+                cost_usd=cost_so_far,
+                gpu_util=gpu_util,
+                samples_per_sec=samples_per_sec,
+            )
+        if self._use_wandb and self._wandb_run is not None:
+            try:
+                import wandb as _wandb  # type: ignore[import]
+                log_data: dict = {
+                    "epoch": epoch + 1,
+                    "train/loss": loss,
+                    "train/cost_usd": cost_so_far,
+                }
+                if val_loss is not None:
+                    log_data["val/loss"] = val_loss
+                if lr is not None:
+                    log_data["train/lr"] = lr
+                if gpu_util is not None:
+                    log_data["gpu/util_pct"] = gpu_util
+                if samples_per_sec is not None:
+                    log_data["train/samples_per_sec"] = samples_per_sec
+                _wandb.log(log_data, step=epoch + 1)
+            except Exception:
+                pass
 
     def save_checkpoint(self, tag: str = "manual") -> Path:
         loss = self.epoch_history[-1].loss if self.epoch_history else 0.0
@@ -592,6 +704,15 @@ class Trainer:
         (_runs_dir() / f"{self.run_id}.json").write_text(
             json.dumps(row, indent=2), encoding="utf-8"
         )
+
+        if self._display is not None:
+            self._display.summary()
+        if self._use_wandb and self._wandb_run is not None:
+            try:
+                import wandb as _wandb  # type: ignore[import]
+                _wandb.finish()
+            except Exception:
+                pass
 
         return TrainerResult(
             run_id=self.run_id,
