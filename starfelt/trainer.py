@@ -152,6 +152,7 @@ class Trainer:
         wandb: bool = False,
         wandb_project: str | None = None,
         wandb_run_name: str | None = None,
+        auto_mount_drive: bool = False,
     ) -> None:
         self.torch = _try_torch()
         if self.torch is None:
@@ -219,6 +220,10 @@ class Trainer:
         self._wandb_project = wandb_project or self.cfg.project
         self._wandb_run = None
         _warn_colab_no_drive()
+
+        if auto_mount_drive and in_colab() and not drive_mounted("/content/drive/MyDrive"):
+            from starfelt.notebook import mount_drive
+            mount_drive()
 
         # Override checkpoint_dir to Drive if in Colab and Drive is mounted
         if checkpoint_dir is None:
