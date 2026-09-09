@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import pytest
 
-from starfelt.hooks import clear_hooks, fire_epoch_end, on_epoch_end
 from starfelt.cli.main import _find_run
+from starfelt.hooks import clear_hooks, fire_epoch_end, on_epoch_end
 
 
 def test_hooks_fire():
@@ -80,3 +79,44 @@ def test_trainer_smoke(tmp_path, monkeypatch):
     assert data.get("source") == "trainer_sdk"
     assert "epoch_history" in data
     assert data.get("grad_accum_steps") == 2
+
+
+@pytest.mark.skipif(
+    __import__("importlib").util.find_spec("torch") is None,
+    reason="torch not installed",
+)
+def test_trainer_flushes_partial_accumulation(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".starfelt").mkdir()
+
+    import torch
+    import torch.nn as nn
+    from torch.utils.data import DataLoader, TensorDataset
+
+    from starfelt import Trainer
+
+    class CountingSGD(torch.optim.SGD):
+        def __init__(self, params):
+            super().__init__(params, lr=0.05)
+            self.step_calls = 0
+
+        def step(self, closure=None):
+            self.step_calls += 1
+            return super().step(closure)
+
+    x = torch.ones(3, 1)
+    y = torch.zeros(3, 1)
+    loader = DataLoader(TensorDataset(x, y), batch_size=1)
+    model = nn.Linear(1, 1)
+    optimizer = CountingSGD(model.parameters())
+
+    Trainer(
+        model,
+        optimizer,
+        loader,
+        loss_fn=nn.MSELoss(),
+        epochs=1,
+        grad_accum_steps=2,
+    ).fit()
+
+    assert optimizer.step_calls == 2

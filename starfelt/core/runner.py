@@ -276,6 +276,8 @@ def run_wrapped(
         gpu_name=(gpu.last.name if gpu.last else None),
         gpu_util_avg=avg,
         gpu_samples=len(gpu.samples),
+        gpu_power_avg_w=gpu.average_power_w(),
+        gpu_energy_j=gpu.energy_j if gpu.power_samples else None,
         interrupted=interrupted["sig"],
     )
 

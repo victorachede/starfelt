@@ -1,4 +1,4 @@
-# Run telemetry schema (v1.0.0)
+# Run telemetry schema (v1.1.0)
 
 Every finished run writes a JSON object under `.starfelt/runs/{run_id}.json` and appends to `.starfelt/history.json`.
 
@@ -18,6 +18,7 @@ Every finished run writes a JSON object under `.starfelt/runs/{run_id}.json` and
 | `model_param_count` | If `STARFELT_MODEL_PARAMS` or probe |
 | `model_size_bucket` / `dataset_size_bucket` | Coarse buckets for grouping |
 | `gpu_name` / `gpu_util_avg` / `gpu_samples` | From nvidia-smi when present |
+| `gpu_power_avg_w` / `gpu_energy_j` | Average GPU power and sampled energy when nvidia-smi exposes power draw |
 | `optimization_flags` | e.g. amp, torch.compile |
 | `workload_id` | Fingerprint: framework + buckets + batch + epochs |
 | `interrupted` | Signal name if SIGINT/SIGTERM |

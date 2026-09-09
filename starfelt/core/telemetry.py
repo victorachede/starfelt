@@ -10,7 +10,7 @@ import json
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-TELEMETRY_SCHEMA_VERSION = "1.0.0"
+TELEMETRY_SCHEMA_VERSION = "1.1.0"
 
 # Documented schema (also enforced loosely when building records)
 TELEMETRY_SCHEMA: dict[str, Any] = {
@@ -33,6 +33,8 @@ TELEMETRY_SCHEMA: dict[str, Any] = {
     "gpu_name": "string|null",
     "gpu_util_avg": "number|null",
     "gpu_samples": "integer|null",
+    "gpu_power_avg_w": "number|null",
+    "gpu_energy_j": "number|null",
     "optimization_flags": "string[]",
     "workload_id": "string",
     "interrupted": "string|null",
@@ -111,6 +113,8 @@ def build_run_telemetry(
     gpu_name: str | None = None,
     gpu_util_avg: float | None = None,
     gpu_samples: int | None = None,
+    gpu_power_avg_w: float | None = None,
+    gpu_energy_j: float | None = None,
     interrupted: str | None = None,
     extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -143,6 +147,8 @@ def build_run_telemetry(
         "gpu_name": gpu_name,
         "gpu_util_avg": gpu_util_avg,
         "gpu_samples": gpu_samples,
+        "gpu_power_avg_w": gpu_power_avg_w,
+        "gpu_energy_j": gpu_energy_j,
         "optimization_flags": hints.optimization_flags,
         "workload_id": wl,
         "interrupted": interrupted,

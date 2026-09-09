@@ -54,7 +54,7 @@ def test_build_telemetry_schema_fields():
         hints=TelemetryHints(framework="pytorch", batch_size=32, epochs=5),
         model_param_count=2_000_000,
     )
-    assert row["schema_version"] == "1.0.0"
+    assert row["schema_version"] == "1.1.0"
     assert row["workload_id"].startswith("wl_")
     assert row["model_size_bucket"] == "1m_100m"
     assert "framework" in row

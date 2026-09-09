@@ -37,6 +37,8 @@ class CostTracker:
         gpu_name: str | None = None,
         gpu_util_avg: float | None = None,
         gpu_samples: int | None = None,
+        gpu_power_avg_w: float | None = None,
+        gpu_energy_j: float | None = None,
         interrupted: str | None = None,
         **extra: Any,
     ) -> dict[str, Any]:
@@ -56,6 +58,8 @@ class CostTracker:
             gpu_name=gpu_name,
             gpu_util_avg=gpu_util_avg,
             gpu_samples=gpu_samples,
+            gpu_power_avg_w=gpu_power_avg_w,
+            gpu_energy_j=gpu_energy_j,
             interrupted=interrupted,
             extra={**self.extras, **extra, "ts": time.time()},
         )
