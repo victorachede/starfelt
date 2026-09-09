@@ -32,7 +32,7 @@ That's it. Starfelt will:
 - Warn you about bad hyperparameters before training starts
 - Show a live table updating every epoch (loss, val, LR, cost, GPU)
 - Save checkpoints to Google Drive automatically
-- Stop early if loss plateaus
+- Stop early when validation loss plateaus if you pass `early_stop_patience`
 
 ---
 
@@ -105,3 +105,7 @@ Run `from starfelt.notebook import mount_drive; mount_drive()` before training, 
 ## What gets saved
 
 Every run writes to `.starfelt/runs/{run_id}.json` — framework, epochs, loss curve, cost, GPU utilization, model size. In Colab with Drive mounted, checkpoints go to `/content/drive/MyDrive/.starfelt/checkpoints/{run_id}/`.
+
+Cost is an estimate based on elapsed time and `cost.gpu_hour_usd` in
+`starfelt.yaml`; it is not a provider invoice. Re-run `starfelt benchmark`
+after changing hardware and update that rate before comparing spend.

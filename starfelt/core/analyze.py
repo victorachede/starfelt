@@ -20,7 +20,7 @@ class AnalysisReport:
     checks: list[Check]
     est_hours: float
     est_cost_usd: float
-    est_cost_optimized_usd: float
+    est_cost_optimized_usd: float | None
     telemetry: TelemetryHints = field(default_factory=TelemetryHints)
 
 
@@ -235,7 +235,7 @@ def analyze_script(script: Path, cfg: StarfeltConfig) -> AnalysisReport:
             checks=checks,
             est_hours=0.1,
             est_cost_usd=0.1 * cfg.gpu_hour_usd,
-            est_cost_optimized_usd=0.1 * cfg.gpu_hour_usd * 0.74,
+            est_cost_optimized_usd=None,
             telemetry=TelemetryHints(),
         )
 
@@ -373,16 +373,30 @@ def analyze_script(script: Path, cfg: StarfeltConfig) -> AnalysisReport:
     ep = epochs or 10
     est_hours = max(0.1, ep * 0.15 * (1.0 if (batch or 32) >= 16 else 1.4))
     est_cost = est_hours * cfg.gpu_hour_usd
-    # Heuristic sketch only — real savings come from starfelt compare run_a run_b
-    est_opt = est_cost * 0.74
+    # This is a rough planning estimate, not a prediction of actual billing.
+    # Do not manufacture an "optimized" baseline before Starfelt has measured
+    # a comparable run.
+    est_opt = None
 
-    checks.append(
-        Check(
-            "budget",
-            "ok" if est_cost <= cfg.budget_usd_per_run else "warn",
-            f"est ${est_cost:.2f} vs budget ${cfg.budget_usd_per_run:.2f}",
-        )
-    )
+    if cfg.budget_usd_per_run > 0:
+        if est_cost > cfg.budget_usd_per_run:
+            checks.append(
+                Check(
+                    "budget",
+                    "fail",
+                    f"estimated cost ${est_cost:.2f} exceeds the "
+                    f"${cfg.budget_usd_per_run:.2f} run budget",
+                )
+            )
+        else:
+            checks.append(
+                Check(
+                    "budget",
+                    "ok",
+                    f"estimated cost ${est_cost:.2f} is within the "
+                    f"${cfg.budget_usd_per_run:.2f} run budget",
+                )
+            )
 
     telem = TelemetryHints(
         framework=primary,

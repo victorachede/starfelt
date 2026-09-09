@@ -28,7 +28,7 @@ starfelt init
 starfelt analyze examples/train_toy.py
 starfelt run examples/train_toy.py
 starfelt status
-starfelt cost --compare
+starfelt compare <run_a> <run_b>
 ```
 
 **Or go nuclear with the SDK (zero CLI required):**
@@ -53,7 +53,8 @@ result = trainer.fit()
 | Lost progress on interrupt | Resumable checkpoints + `starfelt resume` |
 | Static $/hr guesses | `starfelt benchmark` calibrates to *your* box |
 
-Real signal from the first runs: same model, different flags → measurable $ difference. That comparison is the internal sales tool.
+The pre-run cost sketch is intentionally approximate. Real signal comes from
+comparing the same workload with different flags after both runs finish.
 
 ---
 
@@ -67,11 +68,11 @@ Real signal from the first runs: same model, different flags → measurable $ di
 | `starfelt run SCRIPT --force` | Skip critical-issue prompt |
 | `starfelt run SCRIPT --dry-run` | Analyze only |
 | `starfelt status` / `--watch` | Active run + last 5 + total spend |
-| `starfelt cost` / `--compare` | History + baseline savings |
+| `starfelt cost` | Local estimated-cost history |
 | `starfelt inspect {run_id}` | Full telemetry, loss curve, recommendations |
 | `starfelt compare {id1} {id2}` | Side-by-side cost / duration / efficiency |
 | `starfelt resume {run_id}` | Reload last checkpoint and continue |
-| `starfelt benchmark` | Mini job → effective throughput + suggested `$/hr` |
+| `starfelt benchmark` | Repeatable mini job → throughput, energy, and estimated cost |
 | `starfelt config doctor` | Validate `starfelt.yaml` vs real environment |
 | `starfelt providers list` | Static GPU price catalog |
 | `starfelt doctor` | Full environment diagnostics |
@@ -105,10 +106,10 @@ print(result.epoch_history)  # loss, val_loss, lr, smp/s, gpu, mem, cost
 Under the hood:
 
 - Gradient accumulation + AMP + optional DataParallel
-- Eval loop and early-stop on validation loss
+- Eval loop and opt-in early-stop on validation loss
 - Checkpoints to `.starfelt/checkpoints/{run_id}/` (incl. `best.pt`)
 - Per-epoch telemetry: loss, val_loss, samples/sec, GPU util, peak memory, cost
-- Resume via `STARFELT_RESUME_FROM`
+- Resume via `STARFELT_RESUME_FROM` (continues after the checkpointed epoch)
 - Plugin hooks (`on_epoch_end`, `on_checkpoint`, `on_budget_warning`)
 
 ---
@@ -152,9 +153,7 @@ starfelt/
   cli/          # init | analyze | run | status | cost | inspect | compare | …
   core/         # analysis, runner, cost, config, telemetry, gpu
   trainer.py    # Trainer SDK
-  callbacks.py  # Starfelt
-
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/victorachede/starfelt/blob/main/examples/colab_quickstart.ipynb)Callback
+  callbacks.py   # StarfeltCallback
   hooks.py      # plugin surface
   providers/    # static price catalog
 examples/

@@ -5,7 +5,7 @@ import pytest
 
 from starfelt.callbacks import StarfeltCallback
 from starfelt.core.config import load_config
-from starfelt.core.cost import write_interrupted_marker
+from starfelt.core.cost import load_history, write_interrupted_marker
 from starfelt.core.gpu import GpuMonitor
 from starfelt.providers.base import CATALOG, pick_cheapest
 
@@ -58,6 +58,16 @@ def test_interrupted_marker(tmp_path: Path, monkeypatch):
     )
     assert path.exists()
     assert "interrupted" in path.name
+
+
+def test_corrupt_history_fails_loudly(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    starfelt_dir = tmp_path / ".starfelt"
+    starfelt_dir.mkdir()
+    (starfelt_dir / "history.json").write_text("{not-json", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="invalid JSON"):
+        load_history()
 
 
 def test_gpu_monitor_no_smi():

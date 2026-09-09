@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -18,6 +20,29 @@ def _runs_dir() -> Path:
 
 def _history_path() -> Path:
     return Path.cwd() / ".starfelt" / "history.json"
+
+
+def _atomic_write_json(path: Path, payload: Any) -> None:
+    """Write JSON without leaving a half-written file after an interruption."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+        text=True,
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_name, path)
+    finally:
+        try:
+            os.unlink(tmp_name)
+        except FileNotFoundError:
+            pass
 
 
 class CostTracker:
@@ -67,11 +92,8 @@ class CostTracker:
         path = _history_path()
         hist = load_history()
         hist.append(row)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(hist, indent=2), encoding="utf-8")
-        (_runs_dir() / f"{self.run_id}.json").write_text(
-            json.dumps(row, indent=2), encoding="utf-8"
-        )
+        _atomic_write_json(path, hist)
+        _atomic_write_json(_runs_dir() / f"{self.run_id}.json", row)
         return row
 
 
@@ -80,9 +102,15 @@ def load_history() -> list[dict[str, Any]]:
     if not path.exists():
         return []
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return []
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"Could not read {path}: invalid JSON. Restore the file or remove it "
+            "after making a backup."
+        ) from exc
+    if not isinstance(data, list):
+        raise RuntimeError(f"Could not read {path}: expected a JSON list of runs.")
+    return data
 
 
 def _active_path() -> Path:

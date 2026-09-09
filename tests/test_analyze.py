@@ -11,7 +11,9 @@ def test_analyze_toy_example():
     assert "batch_size" in names
     assert "learning_rate" in names
     assert "scheduler" in names
+    assert "budget" in names
     assert report.est_cost_usd > 0
+    assert report.est_cost_optimized_usd is None
 
 
 def test_analyze_torch_style_ast(tmp_path: Path):

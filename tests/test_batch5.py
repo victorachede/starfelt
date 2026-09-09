@@ -68,6 +68,7 @@ def test_trainer_smoke(tmp_path, monkeypatch):
         checkpoint_every_epochs=1,
         grad_accum_steps=2,
     )
+    assert trainer.callback is None
     result = trainer.fit()
     assert result.epochs_completed == 2
     assert len(result.epoch_history) == 2
@@ -120,3 +121,56 @@ def test_trainer_flushes_partial_accumulation(tmp_path, monkeypatch):
     ).fit()
 
     assert optimizer.step_calls == 2
+
+
+@pytest.mark.skipif(
+    __import__("importlib").util.find_spec("torch") is None,
+    reason="torch not installed",
+)
+def test_trainer_resume_continues_after_checkpointed_epoch(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".starfelt").mkdir()
+
+    import torch
+    import torch.nn as nn
+    from torch.utils.data import DataLoader, TensorDataset
+
+    from starfelt import Trainer
+
+    x = torch.randn(8, 2)
+    y = torch.randn(8, 1)
+    loader = DataLoader(TensorDataset(x, y), batch_size=4)
+    checkpoint_dir = tmp_path / "checkpoints"
+
+    first_model = nn.Linear(2, 1)
+    first_optimizer = torch.optim.SGD(first_model.parameters(), lr=0.05)
+    first = Trainer(
+        first_model,
+        first_optimizer,
+        loader,
+        loss_fn=nn.MSELoss(),
+        epochs=2,
+        checkpoint_dir=checkpoint_dir,
+        run_id="resume-test",
+    )
+    first_result = first.fit()
+    latest = checkpoint_dir / "latest.pt"
+    assert first_result.epochs_completed == 2
+    assert latest.exists()
+
+    monkeypatch.setenv("STARFELT_RESUME_FROM", str(latest))
+    resumed_model = nn.Linear(2, 1)
+    resumed_optimizer = torch.optim.SGD(resumed_model.parameters(), lr=0.05)
+    resumed = Trainer(
+        resumed_model,
+        resumed_optimizer,
+        loader,
+        loss_fn=nn.MSELoss(),
+        epochs=4,
+        checkpoint_dir=checkpoint_dir,
+        run_id="resume-test",
+    )
+    result = resumed.fit()
+
+    assert result.epochs_completed == 4
+    assert [row["epoch"] for row in result.epoch_history] == [0, 1, 2, 3]

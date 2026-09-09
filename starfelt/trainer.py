@@ -193,10 +193,14 @@ class Trainer:
         self.run_id = run_id or os.environ.get("STARFELT_RUN_ID") or uuid.uuid4().hex
         os.environ.setdefault("STARFELT_RUN_ID", self.run_id)
 
-        self.callback = callback or StarfeltCallback(
-            patience_steps=getattr(self.cfg, "patience_steps", None)
-        )
+        # Do not silently enable batch-loss early stopping. A plateau in noisy
+        # training loss is not the same as a plateau in validation quality.
+        # Users can opt in with early_stop_patience or an explicit callback.
+        self.callback = callback
+        if self.callback is None and early_stop_patience is not None:
+            self.callback = StarfeltCallback(patience_steps=early_stop_patience)
 
+        user_checkpoint_dir = checkpoint_dir
         if checkpoint_dir is None:
             checkpoint_dir = Path.cwd() / ".starfelt" / "checkpoints" / self.run_id
         self.checkpoint_dir = Path(checkpoint_dir)
@@ -210,6 +214,7 @@ class Trainer:
         self._last_checkpoint: Path | None = None
         self._best_val: float | None = None
         self._val_stale = 0
+        self._resume_epoch = 0
         self._scaler = None
         if self.amp and self.device.type == "cuda":
             self._scaler = self.torch.cuda.amp.GradScaler()
@@ -226,7 +231,7 @@ class Trainer:
             mount_drive()
 
         # Override checkpoint_dir to Drive if in Colab and Drive is mounted
-        if checkpoint_dir is None:
+        if user_checkpoint_dir is None:
             colab_dir = _colab_checkpoint_dir(self.run_id)
             if colab_dir is not None:
                 self.checkpoint_dir = colab_dir
@@ -249,7 +254,7 @@ class Trainer:
             self.epochs = 1
 
         self.model.train()
-        epoch = 0
+        epoch = self._resume_epoch
         total_epochs = self.epochs or 10_000
 
         while epoch < total_epochs:
@@ -314,7 +319,7 @@ class Trainer:
                         self._stopped_early = True
                         break
 
-            if self.callback.stopped or self._stopped_early:
+            if (self.callback is not None and self.callback.stopped) or self._stopped_early:
                 self._stopped_early = True
                 break
 
@@ -430,7 +435,7 @@ class Trainer:
             if self.optimizer.param_groups:
                 last_lr = float(self.optimizer.param_groups[0].get("lr", 0.0))
 
-            if self.callback.step(loss_val):
+            if self.callback is not None and self.callback.step(loss_val):
                 self._stopped_early = True
                 break
 
@@ -645,6 +650,9 @@ class Trainer:
         self._load_model_state(ckpt["model"])
         self.optimizer.load_state_dict(ckpt["optimizer"])
         self._step = int(ckpt.get("step", 0))
+        # Checkpoints store the completed zero-based epoch. Continue with the
+        # next epoch instead of replaying the checkpointed epoch.
+        self._resume_epoch = int(ckpt.get("epoch", -1)) + 1
         self._best_val = ckpt.get("best_val")
         if self.scheduler is not None and "scheduler" in ckpt:
             self.scheduler.load_state_dict(ckpt["scheduler"])

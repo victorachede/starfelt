@@ -70,12 +70,16 @@ def analyze_cmd(script: str, config_path: str | None) -> None:
         table.add_row(item.name, f"[{style}]{item.level}[/]", item.detail)
     console.print(table)
 
+    optimized = (
+        f"${report.est_cost_optimized_usd:.2f}"
+        if report.est_cost_optimized_usd is not None
+        else "not measured yet"
+    )
     console.print(
         Panel(
             f"Est. time: [bold]{report.est_hours:.1f}h[/]\n"
-            f"Est. cost (current): [bold]${report.est_cost_usd:.2f}[/]\n"
-            f"Est. cost (optimized): [bold]${report.est_cost_optimized_usd:.2f}[/]\n"
-            f"Potential save: [bold green]${report.est_cost_usd - report.est_cost_optimized_usd:.2f}[/]",
+            f"Est. cost at configured rate: [bold]${report.est_cost_usd:.2f}[/]\n"
+            f"Measured optimized baseline: [bold]{optimized}[/]",
             title="Cost sketch",
             border_style="cyan",
         )
