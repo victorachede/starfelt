@@ -180,6 +180,61 @@ def test_trainer_resume_continues_after_checkpointed_epoch(tmp_path, monkeypatch
     __import__("importlib").util.find_spec("torch") is None,
     reason="torch not installed",
 )
+def test_resume_latest_continues_mid_epoch(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".starfelt").mkdir()
+
+    import torch
+    import torch.nn as nn
+    from torch.utils.data import DataLoader, TensorDataset
+
+    from starfelt import Trainer, resume_latest
+
+    x = torch.randn(8, 2)
+    y = torch.randn(8, 1)
+    loader = DataLoader(TensorDataset(x, y), batch_size=2)
+    checkpoint_dir = tmp_path / "checkpoints"
+
+    first_model = nn.Linear(2, 1)
+    first = Trainer(
+        first_model,
+        torch.optim.SGD(first_model.parameters(), lr=0.05),
+        loader,
+        loss_fn=nn.MSELoss(),
+        epochs=1,
+        max_steps=2,
+        checkpoint_dir=checkpoint_dir,
+        checkpoint_every_steps=2,
+        run_id="mid-epoch",
+    )
+    first._run_epoch(0)
+    latest = checkpoint_dir / "latest.pt"
+    checkpoint = torch.load(latest, weights_only=False)
+    assert checkpoint["epoch_complete"] is False
+    assert checkpoint["batch_in_epoch"] == 2
+
+    resumed_model = nn.Linear(2, 1)
+    resumed = resume_latest(
+        resumed_model,
+        torch.optim.SGD(resumed_model.parameters(), lr=0.05),
+        loader,
+        checkpoint_dir=checkpoint_dir,
+        loss_fn=nn.MSELoss(),
+        epochs=1,
+        checkpoint_every_steps=2,
+    )
+    assert resumed._resume_epoch == 0
+    assert resumed._resume_batch == 2
+    result = resumed.fit()
+
+    assert result.epochs_completed == 1
+    assert [row["epoch"] for row in result.epoch_history] == [0]
+
+
+@pytest.mark.skipif(
+    __import__("importlib").util.find_spec("torch") is None,
+    reason="torch not installed",
+)
 def test_trainer_quality_target_budget_and_colab_checkpoint(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     (tmp_path / ".starfelt").mkdir()

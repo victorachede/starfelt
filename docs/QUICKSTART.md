@@ -23,6 +23,7 @@ trainer = Trainer(
     loss_fn=loss_fn,         # optional if model returns scalar loss
     epochs=10,
     auto_mount_drive=True,   # saves checkpoints to Drive automatically
+    checkpoint_every_steps=250,  # survive disconnects mid-epoch
     notebook_display=display,
 )
 result = trainer.fit()
@@ -31,7 +32,7 @@ result = trainer.fit()
 That's it. Starfelt will:
 - Warn you about bad hyperparameters before training starts
 - Show a live table updating every epoch (loss, val, LR, cost, GPU)
-- Save checkpoints to Google Drive automatically
+- Save step checkpoints to Google Drive automatically
 - Stop early when validation loss plateaus if you pass `early_stop_patience`
 
 ---
@@ -51,6 +52,22 @@ result = trainer.fit()
 ```
 
 Your `run_id` is printed at the start of every run and in `result.run_id`.
+
+For a one-cell recovery flow after reconnecting:
+
+```python
+from starfelt import resume_latest
+
+trainer = resume_latest(
+    model=model,
+    optimizer=optimizer,
+    train_loader=train_loader,
+    val_loader=val_loader,
+    epochs=10,
+    checkpoint_every_steps=250,
+)
+result = trainer.fit()
+```
 
 ---
 
@@ -83,6 +100,7 @@ starfelt compare run_a run_b   # which run was cheaper and why
 | `stop_at_target` | False | stop after the first validation result at or below `target_val_loss` |
 | `enforce_budget` | True | stop safely at `budget_usd_per_run`; use `False` only intentionally |
 | `checkpoint_every_epochs` | 1 | how often to save checkpoints |
+| `checkpoint_every_steps` | None (200 in Colab) | mid-epoch checkpoint interval |
 | `auto_mount_drive` | False | mount Google Drive automatically in Colab |
 | `notebook_display` | None | pass `StarfeltDisplay()` for live Jupyter output |
 | `wandb` | False | log to Weights & Biases if installed |

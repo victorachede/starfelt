@@ -144,6 +144,7 @@ class Trainer:
         callback: StarfeltCallback | None = None,
         checkpoint_dir: str | Path | None = None,
         checkpoint_every_epochs: int = 1,
+        checkpoint_every_steps: int | None = None,
         project_config: StarfeltConfig | None = None,
         run_id: str | None = None,
         log_every: int = 1,
@@ -200,6 +201,12 @@ class Trainer:
             self.cfg = project_config or load_config()
         except Exception:
             self.cfg = StarfeltConfig()
+        self.checkpoint_every_steps = max(
+            0,
+            checkpoint_every_steps
+            if checkpoint_every_steps is not None
+            else (self.cfg.checkpoint_every_steps if in_colab() else 0),
+        )
 
         self.run_id = run_id or os.environ.get("STARFELT_RUN_ID") or uuid.uuid4().hex
         os.environ.setdefault("STARFELT_RUN_ID", self.run_id)
@@ -226,6 +233,7 @@ class Trainer:
         self._best_val: float | None = None
         self._val_stale = 0
         self._resume_epoch = 0
+        self._resume_batch = 0
         self._budget_exceeded = False
         self._target_reached = False
         self._cost_to_target_usd: float | None = None
@@ -435,7 +443,12 @@ class Trainer:
     def save_checkpoint(self, tag: str = "manual") -> Path:
         loss = self.epoch_history[-1].loss if self.epoch_history else 0.0
         path = self.checkpoint_dir / f"ckpt_{tag}.pt"
-        self._write_ckpt(path, epoch=len(self.epoch_history), loss=loss)
+        self._write_ckpt(
+            path,
+            epoch=len(self.epoch_history),
+            loss=loss,
+            epoch_complete=True,
+        )
         self._last_checkpoint = path
         return path
 
@@ -460,7 +473,11 @@ class Trainer:
         except TypeError:
             loader_len = None
 
+        resume_batch = self._resume_batch if epoch == self._resume_epoch else 0
+        self._resume_batch = 0
         for batch_idx, batch in enumerate(self.train_loader):
+            if batch_idx < resume_batch:
+                continue
             if self.max_steps is not None and self._step >= self.max_steps:
                 break
 
@@ -480,6 +497,16 @@ class Trainer:
 
             if self.optimizer.param_groups:
                 last_lr = float(self.optimizer.param_groups[0].get("lr", 0.0))
+
+            if (
+                self.checkpoint_every_steps
+                and self._step % self.checkpoint_every_steps == 0
+            ):
+                self._save_checkpoint(
+                    epoch,
+                    running_loss / max(n_batches, 1),
+                    batch_in_epoch=batch_idx + 1,
+                )
 
             if self.callback is not None and self.callback.step(loss_val):
                 self._stopped_early = True
@@ -659,22 +686,52 @@ class Trainer:
         m = self.model.module if self._is_dp else self.model
         m.load_state_dict(state)
 
-    def _save_checkpoint(self, epoch: int, loss: float, tag: str | None = None) -> Path:
+    def _save_checkpoint(
+        self,
+        epoch: int,
+        loss: float,
+        tag: str | None = None,
+        batch_in_epoch: int | None = None,
+    ) -> Path:
         if tag:
             path = self.checkpoint_dir / f"{tag}.pt"
+        elif batch_in_epoch is not None:
+            path = self.checkpoint_dir / f"step_{self._step:08d}.pt"
         else:
             path = self.checkpoint_dir / f"epoch_{epoch:04d}.pt"
-        self._write_ckpt(path, epoch=epoch, loss=loss)
+        self._write_ckpt(
+            path,
+            epoch=epoch,
+            loss=loss,
+            batch_in_epoch=batch_in_epoch or 0,
+            epoch_complete=batch_in_epoch is None,
+        )
         try:
-            self._write_ckpt(self.checkpoint_dir / "latest.pt", epoch=epoch, loss=loss)
+            self._write_ckpt(
+                self.checkpoint_dir / "latest.pt",
+                epoch=epoch,
+                loss=loss,
+                batch_in_epoch=batch_in_epoch or 0,
+                epoch_complete=batch_in_epoch is None,
+            )
         except Exception:
             pass
         self._last_checkpoint = path
         return path
 
-    def _write_ckpt(self, path: Path, *, epoch: int, loss: float) -> None:
+    def _write_ckpt(
+        self,
+        path: Path,
+        *,
+        epoch: int,
+        loss: float,
+        batch_in_epoch: int = 0,
+        epoch_complete: bool = True,
+    ) -> None:
         state = {
             "epoch": epoch,
+            "batch_in_epoch": batch_in_epoch,
+            "epoch_complete": epoch_complete,
             "step": self._step,
             "model": self._model_state(),
             "optimizer": self.optimizer.state_dict(),
@@ -696,9 +753,14 @@ class Trainer:
         self._load_model_state(ckpt["model"])
         self.optimizer.load_state_dict(ckpt["optimizer"])
         self._step = int(ckpt.get("step", 0))
-        # Checkpoints store the completed zero-based epoch. Continue with the
-        # next epoch instead of replaying the checkpointed epoch.
-        self._resume_epoch = int(ckpt.get("epoch", -1)) + 1
+        if ckpt.get("epoch_complete", True):
+            # Completed checkpoints continue with the next epoch.
+            self._resume_epoch = int(ckpt.get("epoch", -1)) + 1
+            self._resume_batch = 0
+        else:
+            # Step checkpoints continue inside the interrupted epoch.
+            self._resume_epoch = int(ckpt.get("epoch", 0))
+            self._resume_batch = int(ckpt.get("batch_in_epoch", 0))
         self._best_val = ckpt.get("best_val")
         if self.scheduler is not None and "scheduler" in ckpt:
             self.scheduler.load_state_dict(ckpt["scheduler"])

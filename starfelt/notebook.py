@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import os
 import time
+from pathlib import Path
 from typing import Any
 
 # ---------------------------------------------------------------------------
@@ -55,6 +56,72 @@ def mount_drive(mount_point: str = "/content/drive") -> bool:
     except Exception as e:
         print(f"[starfelt] Drive mount failed: {e}")
         return False
+
+
+def resume_latest(
+    model: Any,
+    optimizer: Any,
+    train_loader: Any,
+    *,
+    run_id: str | None = None,
+    checkpoint_dir: str | Path | None = None,
+    **trainer_kwargs: Any,
+):
+    """Build a Trainer from the newest valid Drive checkpoint.
+
+    Run this after reconnecting a Colab runtime. The returned Trainer resumes
+    from ``latest.pt`` and can continue from the middle of an epoch when step
+    checkpoints are enabled.
+    """
+    if in_colab() and not drive_mounted(
+        os.environ.get("STARFELT_DRIVE_ROOT", "/content/drive/MyDrive")
+    ):
+        mount_drive()
+
+    if checkpoint_dir is None:
+        drive_root = Path(
+            os.environ.get("STARFELT_DRIVE_ROOT", "/content/drive/MyDrive")
+        )
+        checkpoints_root = drive_root / ".starfelt" / "checkpoints"
+        if run_id:
+            checkpoint_dir = checkpoints_root / run_id
+        else:
+            candidates = [
+                path
+                for path in checkpoints_root.glob("*/latest.pt")
+                if path.is_file()
+            ]
+            if not candidates:
+                raise FileNotFoundError(
+                    f"No Starfelt checkpoints found under {checkpoints_root}"
+                )
+            checkpoint_dir = max(candidates, key=lambda path: path.stat().st_mtime).parent
+
+    checkpoint_dir = Path(checkpoint_dir)
+    latest = checkpoint_dir / "latest.pt"
+    if not latest.exists():
+        raise FileNotFoundError(f"No latest.pt found under {checkpoint_dir}")
+
+    resolved_run_id = run_id or checkpoint_dir.name
+    from starfelt.trainer import Trainer
+
+    trainer_kwargs.setdefault("checkpoint_dir", checkpoint_dir)
+    trainer_kwargs.setdefault("run_id", resolved_run_id)
+    previous_resume = os.environ.get("STARFELT_RESUME_FROM")
+    previous_run_id = os.environ.get("STARFELT_RUN_ID")
+    os.environ["STARFELT_RESUME_FROM"] = str(latest)
+    os.environ["STARFELT_RUN_ID"] = resolved_run_id
+    try:
+        return Trainer(model, optimizer, train_loader, **trainer_kwargs)
+    finally:
+        if previous_resume is None:
+            os.environ.pop("STARFELT_RESUME_FROM", None)
+        else:
+            os.environ["STARFELT_RESUME_FROM"] = previous_resume
+        if previous_run_id is None:
+            os.environ.pop("STARFELT_RUN_ID", None)
+        else:
+            os.environ["STARFELT_RUN_ID"] = previous_run_id
 
 
 # ---------------------------------------------------------------------------
