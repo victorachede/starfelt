@@ -79,6 +79,9 @@ starfelt compare run_a run_b   # which run was cheaper and why
 | `amp` | False | mixed precision — faster on CUDA |
 | `grad_accum_steps` | 1 | gradient accumulation steps |
 | `early_stop_patience` | None | stop if val loss doesn't improve for N evals |
+| `target_val_loss` | None | record estimated cost when validation loss first reaches this target |
+| `stop_at_target` | False | stop after the first validation result at or below `target_val_loss` |
+| `enforce_budget` | True | stop safely at `budget_usd_per_run`; use `False` only intentionally |
 | `checkpoint_every_epochs` | 1 | how often to save checkpoints |
 | `auto_mount_drive` | False | mount Google Drive automatically in Colab |
 | `notebook_display` | None | pass `StarfeltDisplay()` for live Jupyter output |
@@ -99,6 +102,12 @@ Either pass `loss_fn=nn.CrossEntropyLoss()` or make your model return a scalar l
 
 **Colab warning: Drive not mounted**
 Run `from starfelt.notebook import mount_drive; mount_drive()` before training, or pass `auto_mount_drive=True` to Trainer.
+
+**Budget limit reached**
+The CLI sends `SIGTERM` to the child process at the configured limit and
+force-terminates it after a 10-second grace period. Use `--no-budget` for a
+deliberate exception. Set `budget_usd_per_run: 0` only when you want the
+automatic stop disabled.
 
 ---
 

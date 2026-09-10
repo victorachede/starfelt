@@ -1,4 +1,4 @@
-# Run telemetry schema (v1.1.0)
+# Run telemetry schema (v1.2.0)
 
 Every finished run writes a JSON object under `.starfelt/runs/{run_id}.json` and appends to `.starfelt/history.json`.
 
@@ -9,7 +9,7 @@ Every finished run writes a JSON object under `.starfelt/runs/{run_id}.json` and
 | `schema_version` | Telemetry schema version |
 | `run_id` | Unique run id |
 | `script` | Path to training script |
-| `duration_s` / `cost_usd` | Duration and tracked cost (real savings via `starfelt compare`) |
+| `duration_s` / `cost_usd` | Duration and estimated cost (real savings via `starfelt compare`) |
 | `exit_code` | Process exit |
 | `framework` | Primary: pytorch / jax / tensorflow / keras / unknown |
 | `frameworks_detected` | All detected |
@@ -22,6 +22,9 @@ Every finished run writes a JSON object under `.starfelt/runs/{run_id}.json` and
 | `optimization_flags` | e.g. amp, torch.compile |
 | `workload_id` | Fingerprint: framework + buckets + batch + epochs |
 | `interrupted` | Signal name if SIGINT/SIGTERM |
+| `budget_exceeded` / `budget_usd` | Whether the configured budget stopped the run and the limit used |
+| `target_val_loss` / `target_reached` | Optional validation-loss target and whether it was reached |
+| `cost_to_target_usd` | Estimated cost at the first epoch that reached the target |
 
 ## Model params
 
@@ -47,3 +50,26 @@ Workload fingerprints are the passive dataset for later chip decisions — what 
 | `checkpoint` | Path to last checkpoint if any |
 
 Per-epoch data is the primary feed for future chip-design decisions: which phases of training burn compute.
+
+## Quality-aware comparisons
+
+The Trainer can record cost-to-quality without pretending that a cheaper run is
+better:
+
+```python
+trainer = Trainer(
+    model,
+    optimizer,
+    train_loader,
+    val_loader=val_loader,
+    target_val_loss=0.25,
+)
+```
+
+Use `stop_at_target=True` when the first acceptable validation result should
+end the run. `starfelt compare` then shows final validation loss and cost to
+target when both runs provide those fields.
+
+The CLI wrapper enforces `budget_usd_per_run` by asking the child process to
+stop at the limit, then force-terminating it after a 10-second grace period.
+Use `--no-budget` only when an operator intentionally accepts that risk.

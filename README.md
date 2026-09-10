@@ -66,6 +66,7 @@ comparing the same workload with different flags after both runs finish.
 | `starfelt analyze SCRIPT` | Pre-run AST checks (batch, LR, DataLoader, budget) |
 | `starfelt run SCRIPT` | Preflight → stream logs → live cost → telemetry |
 | `starfelt run SCRIPT --force` | Skip critical-issue prompt |
+| `starfelt run SCRIPT --no-budget` | Intentionally disable the configured runtime budget stop |
 | `starfelt run SCRIPT --dry-run` | Analyze only |
 | `starfelt status` / `--watch` | Active run + last 5 + total spend |
 | `starfelt cost` | Local estimated-cost history |
@@ -110,6 +111,8 @@ Under the hood:
 - Checkpoints to `.starfelt/checkpoints/{run_id}/` (incl. `best.pt`)
 - Per-epoch telemetry: loss, val_loss, samples/sec, GPU util, peak memory, cost
 - Resume via `STARFELT_RESUME_FROM` (continues after the checkpointed epoch)
+- Runtime budget stop with a 10-second graceful-shutdown window
+- Optional `target_val_loss` telemetry for cost-to-quality comparisons
 - Plugin hooks (`on_epoch_end`, `on_checkpoint`, `on_budget_warning`)
 
 ---

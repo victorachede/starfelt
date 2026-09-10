@@ -10,7 +10,7 @@ import json
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-TELEMETRY_SCHEMA_VERSION = "1.1.0"
+TELEMETRY_SCHEMA_VERSION = "1.2.0"
 
 # Documented schema (also enforced loosely when building records)
 TELEMETRY_SCHEMA: dict[str, Any] = {
@@ -38,6 +38,11 @@ TELEMETRY_SCHEMA: dict[str, Any] = {
     "optimization_flags": "string[]",
     "workload_id": "string",
     "interrupted": "string|null",
+    "budget_exceeded": "boolean",
+    "budget_usd": "number|null",
+    "target_val_loss": "number|null",
+    "target_reached": "boolean",
+    "cost_to_target_usd": "number|null",
 }
 
 

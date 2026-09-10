@@ -27,7 +27,6 @@ What it handles:
 
 from __future__ import annotations
 
-import json
 import os
 import time
 import uuid
@@ -37,7 +36,7 @@ from typing import Any, Callable, Iterable
 
 from starfelt.callbacks import StarfeltCallback
 from starfelt.core.config import StarfeltConfig, load_config
-from starfelt.core.cost import _runs_dir, load_history
+from starfelt.core.cost import _atomic_write_json, _runs_dir, load_history
 from starfelt.core.gpu import GpuMonitor
 from starfelt.core.telemetry import TelemetryHints, build_run_telemetry, size_bucket, workload_id
 from starfelt.hooks import fire_checkpoint, fire_epoch_end
@@ -55,8 +54,11 @@ def _try_torch():
 
 def _colab_checkpoint_dir(run_id: str) -> Path | None:
     """Return a Drive-backed checkpoint dir if in Colab and Drive is mounted."""
-    drive_root = Path("/content/drive/MyDrive/.starfelt/checkpoints")
-    if in_colab() and drive_mounted("/content/drive/MyDrive"):
+    mount_point = Path(
+        os.environ.get("STARFELT_DRIVE_ROOT", "/content/drive/MyDrive")
+    )
+    drive_root = mount_point / ".starfelt/checkpoints"
+    if in_colab() and drive_mounted(str(mount_point)):
         drive_root.mkdir(parents=True, exist_ok=True)
         return drive_root / run_id
     return None
@@ -102,6 +104,9 @@ class TrainerResult:
     epoch_history: list[dict[str, Any]]
     workload_id: str | None = None
     best_val_loss: float | None = None
+    budget_exceeded: bool = False
+    target_val_loss: float | None = None
+    cost_to_target_usd: float | None = None
 
 
 class Trainer:
@@ -153,6 +158,9 @@ class Trainer:
         wandb_project: str | None = None,
         wandb_run_name: str | None = None,
         auto_mount_drive: bool = False,
+        enforce_budget: bool = True,
+        target_val_loss: float | None = None,
+        stop_at_target: bool = False,
     ) -> None:
         self.torch = _try_torch()
         if self.torch is None:
@@ -173,6 +181,9 @@ class Trainer:
         self.early_stop_patience = early_stop_patience
         self.eval_every_epochs = max(1, eval_every_epochs)
         self.on_epoch_end = on_epoch_end
+        self.enforce_budget = enforce_budget
+        self.target_val_loss = target_val_loss
+        self.stop_at_target = stop_at_target
 
         if device is None:
             device = "cuda" if self.torch.cuda.is_available() else "cpu"
@@ -215,6 +226,9 @@ class Trainer:
         self._best_val: float | None = None
         self._val_stale = 0
         self._resume_epoch = 0
+        self._budget_exceeded = False
+        self._target_reached = False
+        self._cost_to_target_usd: float | None = None
         self._scaler = None
         if self.amp and self.device.type == "cuda":
             self._scaler = self.torch.cuda.amp.GradScaler()
@@ -300,6 +314,38 @@ class Trainer:
             if (epoch + 1) % self.checkpoint_every_epochs == 0:
                 path = self._save_checkpoint(epoch, train_stats["loss"])
                 fire_checkpoint(str(path))
+
+            if (
+                val_loss is not None
+                and self.target_val_loss is not None
+                and val_loss <= self.target_val_loss
+                and not self._target_reached
+            ):
+                self._target_reached = True
+                self._cost_to_target_usd = cost_so_far
+                print(
+                    f"[starfelt] quality target reached — val loss "
+                    f"{val_loss:.4f} <= {self.target_val_loss:.4f} "
+                    f"at estimated cost ${cost_so_far:.4f}",
+                    flush=True,
+                )
+                if self.stop_at_target:
+                    self._stopped_early = True
+                    break
+
+            if (
+                self.enforce_budget
+                and self.cfg.budget_usd_per_run > 0
+                and cost_so_far >= self.cfg.budget_usd_per_run
+            ):
+                self._budget_exceeded = True
+                self._stopped_early = True
+                print(
+                    f"[starfelt] budget limit reached — stopping at "
+                    f"${cost_so_far:.4f} / ${self.cfg.budget_usd_per_run:.2f}",
+                    flush=True,
+                )
+                break
 
             # Val-based early stop
             if val_loss is not None and self.early_stop_patience is not None:
@@ -660,6 +706,14 @@ class Trainer:
             self._scaler.load_state_dict(ckpt["scaler"])
         for raw in ckpt.get("epoch_history") or []:
             self.epoch_history.append(EpochRecord(**raw))
+            if (
+                self.target_val_loss is not None
+                and raw.get("val_loss") is not None
+                and raw["val_loss"] <= self.target_val_loss
+                and self._cost_to_target_usd is None
+            ):
+                self._target_reached = True
+                self._cost_to_target_usd = float(raw.get("cost_usd") or 0.0)
         print(f"[starfelt] resumed from {path}  step={self._step}", flush=True)
 
     def _finalize(self, epochs_completed: int) -> TrainerResult:
@@ -727,6 +781,11 @@ class Trainer:
                 "final_loss": final_loss,
                 "final_val_loss": final_val,
                 "best_val_loss": self._best_val,
+                "budget_exceeded": self._budget_exceeded,
+                "budget_usd": self.cfg.budget_usd_per_run if self.enforce_budget else None,
+                "target_val_loss": self.target_val_loss,
+                "target_reached": self._target_reached,
+                "cost_to_target_usd": self._cost_to_target_usd,
                 "checkpoint": str(self._last_checkpoint) if self._last_checkpoint else None,
                 "grad_accum_steps": self.grad_accum_steps,
             },
@@ -735,11 +794,8 @@ class Trainer:
         hist_path = Path.cwd() / ".starfelt" / "history.json"
         hist = load_history()
         hist.append(row)
-        hist_path.parent.mkdir(parents=True, exist_ok=True)
-        hist_path.write_text(json.dumps(hist, indent=2), encoding="utf-8")
-        (_runs_dir() / f"{self.run_id}.json").write_text(
-            json.dumps(row, indent=2), encoding="utf-8"
-        )
+        _atomic_write_json(hist_path, hist)
+        _atomic_write_json(_runs_dir() / f"{self.run_id}.json", row)
 
         if self._display is not None:
             self._display.summary()
@@ -762,4 +818,7 @@ class Trainer:
             epoch_history=epoch_rows,
             workload_id=wl,
             best_val_loss=self._best_val,
+            budget_exceeded=self._budget_exceeded,
+            target_val_loss=self.target_val_loss,
+            cost_to_target_usd=self._cost_to_target_usd,
         )

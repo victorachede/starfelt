@@ -39,6 +39,7 @@ class RunResult:
     aborted: bool = False
     gpu_util_avg: float | None = None
     interrupted: bool = False
+    budget_exceeded: bool = False
     workload_id: str | None = None
     framework: str | None = None
 
@@ -95,6 +96,7 @@ def run_wrapped(
     dry_run: bool = False,
     force: bool = False,
     confirm_fails: bool = True,
+    enforce_budget: bool = True,
 ) -> RunResult:
     report = analyze_script(script, cfg)
     print_preflight_table(report)
@@ -140,6 +142,7 @@ def run_wrapped(
     env["STARFELT_CHECKPOINT_EVERY"] = str(cfg.checkpoint_every_steps)
     env["STARFELT_PATIENCE_STEPS"] = str(cfg.patience_steps)
     env["STARFELT_EST_COST_USD"] = f"{report.est_cost_usd:.4f}"
+    env["STARFELT_BUDGET_USD"] = f"{cfg.budget_usd_per_run:.4f}"
     env["PYTHONUNBUFFERED"] = "1"
 
     cmd = [sys.executable, "-u", str(script), *script_args]
@@ -156,6 +159,7 @@ def run_wrapped(
             "script": str(script),
             "started_at": time.time(),
             "gpu_hour_usd": cfg.gpu_hour_usd,
+            "budget_usd": cfg.budget_usd_per_run if enforce_budget else None,
         }
     )
 
@@ -211,22 +215,47 @@ def run_wrapped(
     t0 = time.time()
     last_tick = 0.0
     last_gpu = 0.0
+    budget_exceeded = False
+    budget_stop_sent_at: float | None = None
 
     try:
         done_reading = False
         while True:
             now = time.time()
+            elapsed = now - t0
+            cost = (elapsed / 3600.0) * cfg.gpu_hour_usd
             if now - last_gpu >= 2.0:
                 gpu.poll()
                 last_gpu = now
             if now - last_tick >= 0.25:
-                elapsed = now - t0
-                cost = (elapsed / 3600.0) * cfg.gpu_hour_usd
                 util = gpu.last.util_pct if gpu.last else None
                 util_s = f"  ·  GPU {util:.0f}%" if util is not None else ""
                 tick = f"⏱ {_format_elapsed(elapsed)}  ·  ${cost:.4f}{util_s}"
                 console.print(f"\r[dim]{tick}[/]", end="", highlight=False)
                 last_tick = now
+
+            if (
+                enforce_budget
+                and cfg.budget_usd_per_run > 0
+                and cost >= cfg.budget_usd_per_run
+                and proc.poll() is None
+            ):
+                if budget_stop_sent_at is None:
+                    budget_exceeded = True
+                    budget_stop_sent_at = now
+                    console.print(
+                        f"\n[yellow]Budget limit reached (${cfg.budget_usd_per_run:.2f})[/] "
+                        "— asking the training process to stop safely."
+                    )
+                    try:
+                        proc.send_signal(signal.SIGTERM)
+                    except OSError:
+                        pass
+                elif now - budget_stop_sent_at >= 10.0:
+                    console.print(
+                        "[yellow]Training did not stop after 10s; terminating it.[/]"
+                    )
+                    proc.kill()
 
             try:
                 item = q.get(timeout=0.25)
@@ -279,6 +308,8 @@ def run_wrapped(
         gpu_power_avg_w=gpu.average_power_w(),
         gpu_energy_j=gpu.energy_j if gpu.power_samples else None,
         interrupted=interrupted["sig"],
+        budget_exceeded=budget_exceeded,
+        budget_usd=cfg.budget_usd_per_run if enforce_budget else None,
     )
 
     if exit_code != 0:
@@ -292,6 +323,7 @@ def run_wrapped(
         checks=report.checks,
         gpu_util_avg=avg,
         interrupted=interrupted["sig"] is not None,
+        budget_exceeded=budget_exceeded,
         workload_id=row.get("workload_id"),
         framework=row.get("framework"),
     )

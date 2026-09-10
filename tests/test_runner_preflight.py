@@ -33,3 +33,21 @@ def test_run_force_skips_prompt(tmp_path: Path):
     )
     assert result.exit_code == 0
     assert not result.aborted
+
+
+def test_run_stops_when_budget_is_reached(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    script = tmp_path / "slow.py"
+    script.write_text("import time\ntime.sleep(2)\n", encoding="utf-8")
+
+    result = run_wrapped(
+        script,
+        [],
+        StarfeltConfig(budget_usd_per_run=0.000001),
+        force=True,
+        confirm_fails=False,
+    )
+
+    assert result.budget_exceeded
+    assert result.exit_code != 0
+    assert (tmp_path / ".starfelt" / "history.json").exists()

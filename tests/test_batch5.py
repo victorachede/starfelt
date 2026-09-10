@@ -174,3 +174,96 @@ def test_trainer_resume_continues_after_checkpointed_epoch(tmp_path, monkeypatch
 
     assert result.epochs_completed == 4
     assert [row["epoch"] for row in result.epoch_history] == [0, 1, 2, 3]
+
+
+@pytest.mark.skipif(
+    __import__("importlib").util.find_spec("torch") is None,
+    reason="torch not installed",
+)
+def test_trainer_quality_target_budget_and_colab_checkpoint(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".starfelt").mkdir()
+
+    import torch
+    import torch.nn as nn
+    from torch.utils.data import DataLoader, TensorDataset
+
+    from starfelt import Trainer
+    from starfelt.core.config import StarfeltConfig
+
+    drive_mount = tmp_path / "MyDrive"
+    drive_mount.mkdir()
+    monkeypatch.setenv("STARFELT_DRIVE_ROOT", str(drive_mount))
+    monkeypatch.setattr("starfelt.trainer.in_colab", lambda: True)
+    monkeypatch.setattr(
+        "starfelt.trainer.drive_mounted",
+        lambda path: path == str(drive_mount),
+    )
+    drive_dir = drive_mount / ".starfelt" / "checkpoints" / "colab-test"
+    x = torch.ones(4, 1)
+    y = torch.zeros(4, 1)
+    loader = DataLoader(TensorDataset(x, y), batch_size=2)
+    model = nn.Linear(1, 1)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
+    trainer = Trainer(
+        model,
+        optimizer,
+        loader,
+        loss_fn=nn.MSELoss(),
+        val_loader=loader,
+        epochs=5,
+        checkpoint_every_epochs=1,
+        project_config=StarfeltConfig(
+            budget_usd_per_run=0,
+            gpu_hour_usd=1.2,
+        ),
+        run_id="colab-test",
+        target_val_loss=1000.0,
+        stop_at_target=True,
+    )
+
+    assert trainer.checkpoint_dir == drive_dir
+    result = trainer.fit()
+
+    assert result.target_val_loss == 1000.0
+    assert result.cost_to_target_usd is not None
+    assert result.epochs_completed == 1
+    assert (drive_dir / "latest.pt").exists()
+    assert result.budget_exceeded is False
+
+
+@pytest.mark.skipif(
+    __import__("importlib").util.find_spec("torch") is None,
+    reason="torch not installed",
+)
+def test_trainer_stops_at_budget(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".starfelt").mkdir()
+
+    import torch
+    import torch.nn as nn
+    from torch.utils.data import DataLoader, TensorDataset
+
+    from starfelt import Trainer
+    from starfelt.core.config import StarfeltConfig
+
+    x = torch.ones(8, 1)
+    y = torch.zeros(8, 1)
+    loader = DataLoader(TensorDataset(x, y), batch_size=2)
+    model = nn.Linear(1, 1)
+    trainer = Trainer(
+        model,
+        torch.optim.SGD(model.parameters(), lr=0.01),
+        loader,
+        loss_fn=nn.MSELoss(),
+        epochs=10,
+        project_config=StarfeltConfig(
+            budget_usd_per_run=0.000000000001,
+            gpu_hour_usd=1.2,
+        ),
+    )
+
+    result = trainer.fit()
+
+    assert result.budget_exceeded
+    assert result.stopped_early

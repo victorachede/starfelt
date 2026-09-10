@@ -96,12 +96,18 @@ def analyze_cmd(script: str, config_path: str | None) -> None:
     is_flag=True,
     help="Skip confirmation when analysis has fail-level checks",
 )
+@click.option(
+    "--no-budget",
+    is_flag=True,
+    help="Do not stop the process at budget_usd_per_run",
+)
 def run_cmd(
     script: str,
     script_args: tuple[str, ...],
     config_path: str | None,
     dry_run: bool,
     force: bool,
+    no_budget: bool,
 ) -> None:
     """Wrap and run a training script with Starfelt monitoring."""
     cfg = load_config(Path(config_path) if config_path else None)
@@ -112,6 +118,7 @@ def run_cmd(
         dry_run=dry_run,
         force=force,
         confirm_fails=not force,
+        enforce_budget=not no_budget,
     )
     if result.aborted:
         raise SystemExit(2)
@@ -122,12 +129,14 @@ def run_cmd(
     lines = [
         f"Exit code: {result.exit_code}",
         f"Duration: {result.duration_s:.1f}s",
-        f"Tracked cost: ${result.cost_usd:.4f}",
+        f"Estimated cost: ${result.cost_usd:.4f}",
     ]
     if result.gpu_util_avg is not None:
         lines.append(f"Avg GPU util: {result.gpu_util_avg:.0f}%")
     if result.interrupted:
         lines.append("Interrupted: marker written under .starfelt/runs/")
+    if result.budget_exceeded:
+        lines.append("Budget: limit reached; process was asked to stop safely")
     if result.framework:
         lines.append(f"Framework: {result.framework}")
     if result.workload_id:
@@ -137,7 +146,9 @@ def run_cmd(
         Panel(
             "\n".join(lines),
             title="Run complete",
-            border_style="green" if result.exit_code == 0 else "red",
+            border_style="green"
+            if result.exit_code == 0 and not result.budget_exceeded
+            else "red",
         )
     )
 
@@ -186,12 +197,18 @@ def _status_renderable():
         elapsed = max(0.0, time.time() - started)
         rate = float(active.get("gpu_hour_usd") or 1.2)
         cost = (elapsed / 3600.0) * rate
+        budget = active.get("budget_usd")
+        budget_line = (
+            f" / ${float(budget):.2f} limit"
+            if budget is not None
+            else ""
+        )
         parts.append(
             Panel(
                 f"Run id: {active.get('run_id', '?')}\n"
                 f"Script: {active.get('script', '?')}\n"
                 f"Elapsed: {elapsed:.0f}s\n"
-                f"Live cost: ${cost:.4f}",
+                f"Live cost: ${cost:.4f}{budget_line}",
                 title="Active run",
                 border_style="cyan",
             )
@@ -394,6 +411,23 @@ def inspect_cmd(run_id: str, as_json: bool) -> None:
         table.add_row("Opts", ", ".join(row["optimization_flags"]))
     if row.get("source"):
         table.add_row("Source", str(row["source"]))
+    if row.get("budget_usd") is not None:
+        budget_status = "exceeded" if row.get("budget_exceeded") else "within limit"
+        table.add_row(
+            "Budget",
+            f"${float(row['budget_usd']):.2f} ({budget_status})",
+        )
+    if row.get("target_val_loss") is not None:
+        target_status = "reached" if row.get("target_reached") else "not reached"
+        table.add_row(
+            "Quality target",
+            f"val loss ≤ {float(row['target_val_loss']):.4f} ({target_status})",
+        )
+    if row.get("cost_to_target_usd") is not None:
+        table.add_row(
+            "Cost to target",
+            f"${float(row['cost_to_target_usd']):.4f}",
+        )
     console.print(table)
 
     history = row.get("epoch_history") or []
@@ -487,6 +521,25 @@ def compare_cmd(run_id_1: str, run_id_2: str) -> None:
         fmt = (lambda v: str(int(v))) if key == "exit_code" else (lambda v: f"{v:.4f}")
         table.add_row(label, fmt(va), fmt(vb), winner)
 
+    optional_metrics = [
+        ("Final val loss", "final_val_loss", True),
+        ("Cost to target ($)", "cost_to_target_usd", True),
+    ]
+    for label, key, lower_better in optional_metrics:
+        if a.get(key) is None and b.get(key) is None:
+            continue
+        va = a.get(key)
+        vb = b.get(key)
+        va_s = f"{float(va):.4f}" if va is not None else "—"
+        vb_s = f"{float(vb):.4f}" if vb is not None else "—"
+        if va is None or vb is None:
+            winner = "—"
+        elif va == vb:
+            winner = "tie"
+        else:
+            winner = "A" if (va < vb) == lower_better else "B"
+        table.add_row(label, va_s, vb_s, winner)
+
     table.add_row("Framework", str(a.get("framework", "—")), str(b.get("framework", "—")), "—")
     table.add_row("Batch", str(a.get("batch_size", "—")), str(b.get("batch_size", "—")), "—")
     table.add_row("Epochs", str(a.get("epochs", "—")), str(b.get("epochs", "—")), "—")
@@ -514,7 +567,13 @@ def compare_cmd(run_id_1: str, run_id_2: str) -> None:
     help="Override script path",
 )
 @click.option("--force", is_flag=True)
-def resume_cmd(run_id: str, script_path: str | None, force: bool) -> None:
+@click.option("--no-budget", is_flag=True, help="Disable the configured budget stop")
+def resume_cmd(
+    run_id: str,
+    script_path: str | None,
+    force: bool,
+    no_budget: bool,
+) -> None:
     """Resume an interrupted or checkpointed run.
 
     Finds the last checkpoint under .starfelt/checkpoints/{run_id}/ and
@@ -552,7 +611,14 @@ def resume_cmd(run_id: str, script_path: str | None, force: bool) -> None:
     try:
         _os.environ["STARFELT_RESUME_FROM"] = str(latest.resolve())
         _os.environ["STARFELT_RUN_ID"] = full_id
-        result = run_wrapped(script, [], cfg, force=force, confirm_fails=not force)
+        result = run_wrapped(
+            script,
+            [],
+            cfg,
+            force=force,
+            confirm_fails=not force,
+            enforce_budget=not no_budget,
+        )
     finally:
         _os.environ.clear()
         _os.environ.update(backup)
@@ -562,7 +628,9 @@ def resume_cmd(run_id: str, script_path: str | None, force: bool) -> None:
     console.print(
         Panel(
             f"Exit: {result.exit_code}\nDuration (this segment): {result.duration_s:.1f}s\n"
-            f"Cost (this segment): ${result.cost_usd:.4f}\nRun id: {result.run_id}",
+            f"Estimated cost (this segment): ${result.cost_usd:.4f}\n"
+            f"Budget exceeded: {'yes' if result.budget_exceeded else 'no'}\n"
+            f"Run id: {result.run_id}",
             title="Resume complete",
             border_style="green" if result.exit_code == 0 else "red",
         )
@@ -668,8 +736,14 @@ def _config_doctor() -> None:
             "run [cyan]starfelt benchmark[/]",
         )
 
-    if cfg.budget_usd_per_run <= 0:
-        table.add_row("budget_usd_per_run", "[red]fail[/]", "must be > 0")
+    if cfg.budget_usd_per_run == 0:
+        table.add_row(
+            "budget_usd_per_run",
+            "[yellow]warn[/]",
+            "disabled — runs will not stop automatically for cost",
+        )
+    elif cfg.budget_usd_per_run < 0:
+        table.add_row("budget_usd_per_run", "[red]fail[/]", "must be >= 0")
     else:
         hours_affordable = cfg.budget_usd_per_run / cfg.gpu_hour_usd
         table.add_row(
